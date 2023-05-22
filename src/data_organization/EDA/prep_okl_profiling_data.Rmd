@@ -1,0 +1,71 @@
+```{r}
+library(tidyverse)
+library(fst)
+library(here)
+```
+
+```{r}
+# read in data
+compound_dictionary <- read_fst(here("data/lsp_compound_dictionary.fst"))
+profiling_data_1 = read_csv(here("data/24-sample-set-10uM-100nM-US073-0016938-O_HAR004-01-p-00001-000-00_scanMAX_Data Report.csv"))
+profiling_data_2 = read_csv(here("data/184-sample-set-1uM-12.5nM-US073-0018693-O_HAR005-01-p-00001-000-00_scanMAX_Data Report.csv"))
+profiling_data_3 = read_csv(here("data/184-sample-set-US073-0016937-O_HAR001-01-p-00001-000-00_scanMAX_Data Report.csv"))
+```
+
+```{r}
+# combine profiling data
+okl_profiling_data <- bind_rows(profiling_data_1, profiling_data_2, profiling_data_3)  %>% 
+    rename(hmsl_id = `Compound Name`,
+            discoverx_gene_symbol = `DiscoveRx Gene Symbol`,
+            entrez_gene_symbol = `Entrez Gene Symbol`,
+            percent_control = `Percent Control`,
+            concentration_nM = `Compound Concentration (nM)`
+    )
+```
+
+```{r}
+# join compound dictionary to profiling data
+drug_ids = compound_dictionary  %>% 
+    select(hmsl_id, chembl_id, pref_name) %>%
+    filter(!is.na(hmsl_id))
+
+okl_profiling_data_processed <- okl_profiling_data %>%
+    left_join(drug_ids)  %>% 
+    rename(drug = pref_name) %>%
+    filter(!str_detect(discoverx_gene_symbol, fixed("(")))  %>% 
+    drop_na()
+    #mutate(kinase = if_else(str_detect(discoverx_gene_symbol, fixed("-")), discoverx_gene_symbol, entrez_gene_symbol))
+```
+
+```{r}
+#EDA
+drug_count = okl_profiling_data_processed %>%
+    group_by(drug) %>%
+    summarise(n = n()) %>%
+    arrange(desc(n))
+
+dose_count = okl_profiling_data_processed %>%
+    group_by(concentration_nM) %>%
+    summarise(n = n()) %>%
+    arrange(desc(n))
+
+dose_count  %>% 
+    ggplot(aes(x = as.character(concentration_nM), y = n)) +
+    geom_col()
+#99% of doses are 12.5, 100, 1000, 10000 nM
+
+kinase_count = okl_profiling_data_processed %>%
+    group_by(discoverx_gene_symbol) %>%
+    summarise(n = n()) %>%
+    arrange(desc(n))
+
+#distribution of percent control
+okl_profiling_data_processed  %>%
+filter( concentration_nM %in% c(12.5, 100, 1000, 10000))  %>%  
+    ggplot(aes(x = percent_control)) +
+    geom_histogram()
+```
+
+```{r}
+
+```
