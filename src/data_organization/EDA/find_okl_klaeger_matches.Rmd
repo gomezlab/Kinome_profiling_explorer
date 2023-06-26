@@ -1,0 +1,49 @@
+```{r}
+library(tidyverse)
+library(here)
+library(webchem)
+```
+
+```{r}
+klaeger = read_rds(here("data/klaeger_full_tidy.rds"))
+klaeger_cids = read_csv(here("data/klaeger_cids.csv"))
+
+here("results/okl_profiling_data.rds.gz") %>% read_rds() -> okl_profiling_data
+```
+
+```{r}
+okl_cids = get_cid(unique(okl_profiling_data$drug), from = "name", domain = "compound", match = "all", verbose = T)
+
+okl_cids_all = okl_cids  %>% 
+    mutate(cid = case_when(
+        query == "XMD11-50" ~ "46843906",
+        query == "MPS-1-IN-1" ~ "91691119",
+        query == "RSL3, (1S, 3R)-" ~ "1750826",
+        TRUE ~ cid
+    )) %>% 
+    drop_na()
+```
+
+```{r}
+drug_matches = klaeger_cids %>% 
+    mutate(cid = as.character(cid)) %>%
+    inner_join(okl_cids_all, by = c("cid" = "cid")) %>% 
+    select(klaeger_name, query) %>% 
+    rename("okl_drug_name" = query,
+           "klaeger_drug_name" = klaeger_name)
+```
+
+```{r}
+klaeger_kinase_names = klaeger %>% 
+    select(gene_name) %>% 
+    unique() %>% 
+    rename("klaeger_kinase_name" = gene_name)
+
+okl_kinase_names = okl_profiling_data %>%
+    select(entrez_gene_symbol) %>% 
+    unique() %>% 
+    rename("okl_kinase_name" = entrez_gene_symbol)
+
+kinase_name_matches = okl_kinase_names %>% 
+    inner_join(klaeger_kinase_names, by = c("okl_kinase_name" = "klaeger_kinase_name"))
+```
