@@ -1,0 +1,137 @@
+---
+title: "find LINCS klaeger compound and kinase matches"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(here)
+library(webchem)
+```
+
+```{r}
+#read in data
+
+LINCS_percent_matrix = read_csv(here('results/full_LINCS_UNC_1uM_data_imputed.csv'))
+
+klaeger_tidy = read_rds(here('data/klaeger_full_tidy.rds'))
+
+```
+
+```{r}
+LINCS_long = LINCS_percent_matrix %>% 
+	pivot_longer(c(-Small.Molecule.Name, -Dose), names_to = 'kinase', values_to = 'percent_control')
+```
+
+```{r}
+#kinase matching
+klaeger_kinases = klaeger_tidy %>% 
+	select(gene_name) %>%
+	unique()
+
+write_csv(klaeger_kinases, here('results/klaeger_kinases.csv'))
+	
+klaeger_gene_labels = read_csv(here('data/klaeger_manual_gene_labels.csv')) %>% 
+	mutate(kinase = case_when(
+		class == 'Light' ~ 'kinase',
+		class == 'Dark' ~ 'kinase',
+		class == 'Non-kinase' ~ 'non-kinase',
+		T ~ 'NA'
+	))
+
+klaeger_strict_kinases = klaeger_gene_labels %>% 
+	filter(kinase == 'kinase') 
+	
+kinomescan_protein_info = read_csv(here('data/LINCS/LINCS_kinomescan_protein_info.csv')) %>% 
+	select(Name, `Gene Symbol`) %>% 
+	rename('LINCS_name' = Name, 'gene_symbol' = `Gene Symbol`)
+
+LINCS_kinases = LINCS_long %>% 
+	select(kinase) %>% 
+	unique()
+
+matched_kinases = klaeger_kinases %>% 
+	left_join(kinomescan_protein_info, by = c('gene_name' = 'gene_symbol')) %>% 
+		mutate(LINCS_name = case_when(
+		gene_name == 'ADRBK1' ~ 'BARK1',
+		gene_name == 'CSNK2A1;CSNK2A3' ~ 'CSNK2A1',
+		gene_name == 'PASK' ~ 'STK39',
+		gene_name == 'PDPK1;PDPK2P' ~ 'PDPK1',
+		gene_name == 'PRKCE;PRKCH' ~ 'PRKCE',
+		gene_name == 'PRKCE;PRKCH' ~ 'PRKCH',
+		T ~ LINCS_name
+		)) %>% 
+	filter(!is.na(LINCS_name)) %>% 
+	filter(!str_detect(LINCS_name, pattern = '\\(')) %>% 
+	rename('klaeger_name' = gene_name)
+
+unmatched_klaeger_kinases = klaeger_strict_kinases %>% 
+	filter(!gene_name %in% matched_kinases$kinase) %>% 
+	select(gene_name)
+
+unmatched_LINCS_kinases = LINCS_kinases %>% 
+	filter(!kinase %in% matched_kinases$kinase) %>% 
+	select(kinase)
+
+write_csv(matched_kinases, here('results/LINCS_klaeger_kinase_matches.csv'))
+```
+
+```{r}
+#compound matching
+klaeger_cid = read_csv(here('data/klaeger_cids.csv')) %>% 
+	mutate(cid = as.character(cid))
+
+# LINCS_cid = get_cid(unique(LINCS_long$Small.Molecule.Name), from = "name", domain = "compound", match = "all", verbose = T) %>%
+# 	rename("LINCS_name" = query)
+# write_csv(LINCS_cid, here('results/LINCS_cid.csv'))
+
+LINCS_cid = read_csv(here('results/LINCS_cid.csv')) %>% 
+	mutate(cid = as.character(cid))
+
+LINCS_smiles = read_csv(here('data/LINCS/LINCS_compounds_smiles.csv'))
+
+LINCS_cids_from_smiles = read_tsv(here('data/LINCS/LINCS_smiles_to_CID.txt'), col_names = F) %>% 
+	rename('smiles' = X1, 'cid' = X2) %>% 
+	left_join(LINCS_smiles, by = c('smiles' = 'Smiles')) %>% 
+	filter(!is.na(cid))
+
+write_csv(LINCS_cids_from_smiles, here('results/LINCS_cids_from_smiles.csv'))
+
+LINCS_cids_all = LINCS_cid %>% 
+	left_join(select(LINCS_cids_from_smiles, Compound, cid), by = c('LINCS_name' = 'Compound')) %>% 
+	mutate(cid = if_else(
+		is.na(cid.x),
+		as.character(cid.y),
+		as.character(cid.x)
+	)) %>% 
+	select(-cid.y, -cid.x) %>% 
+	mutate(cid = case_when(
+		LINCS_name == 'ALW-II-38-3' ~ '24880028',
+		LINCS_name == 'KIN001-123' ~ '49821040',
+		LINCS_name == 'MPS-1-IN-1' ~ '25195352',
+		LINCS_name == 'KIN001-021' ~ '24825971',
+		LINCS_name == 'QL-XII-47' ~ '71748056',
+		T ~ cid
+	)) %>% 
+		filter(!is.na(cid))
+	
+write_csv(LINCS_cids_all, here('results/all_LINCS_cids.csv'))
+	
+drug_matches = klaeger_cid %>% 
+	left_join(LINCS_cids_all, by = 'cid') %>% 
+	filter(!is.na(LINCS_name))
+
+klaeger_no_drug_matches = klaeger_cid %>% 
+	filter(!cid %in% drug_matches$cid)
+
+LINCS_no_drug_matches = LINCS_cid %>%
+	filter(!cid %in% drug_matches$cid)
+
+write_csv(drug_matches, here('results/LINCS_klaeger_drug_matches.csv'))
+
+LINCS_klaeger_cids = LINCS_cids_all %>% 
+	rename('drug' = LINCS_name) %>% 
+	bind_rows(rename(klaeger_cid, 'drug' = klaeger_name))
+
+write_csv(LINCS_klaeger_cids, here('results/LINCS_klaeger_cids.csv'))
+```

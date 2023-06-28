@@ -1,0 +1,110 @@
+```{r}
+library(tidyverse)
+library(here)
+library(webchem)
+library(biomaRt)
+library(conflicted)
+conflict_prefer("select", "dplyr")
+conflict_prefer("filter", "dplyr")
+```
+
+#Read in both datasets and their compound + kinase metadata
+```{r}
+#both datasets compound info
+klaeger_cids = read_csv(here("data/klaeger_data/klaeger_cids.csv"))
+here("results/okl_profiling_data.rds.gz") %>% read_rds() -> okl_profiling_data
+
+#both datasets kinase info
+klaeger_tidy = read_rds(here('data/klaeger_data/klaeger_full_tidy.rds'))
+klaeger_kinases = klaeger_tidy %>% 
+	dplyr::select(gene_name) %>%
+	unique()
+
+okl_kinase_names = read_csv(here('data/okl_profiling_data/eurofins_kinase_info.csv')) %>% 
+	dplyr::select(`DiscoveRx Gene Symbol`, `Entrez Gene Symbol`, entrezgene_id) %>% 
+	rename('okl_kinase_name' = `DiscoveRx Gene Symbol`, 'entrez_gene_symbol' = `Entrez Gene Symbol`)
+```
+
+#Match compound names between datasets uding pubchem CIDs
+```{r}
+okl_cids = get_cid(unique(okl_profiling_data$drug), from = "name", domain = "compound", match = "all", verbose = T)
+
+okl_cids_all = okl_cids  %>% 
+    mutate(cid = case_when(
+        query == "XMD11-50" ~ "46843906",
+        query == "MPS-1-IN-1" ~ "91691119",
+        query == "RSL3, (1S, 3R)-" ~ "1750826",
+        TRUE ~ cid
+    )) %>% 
+    drop_na()
+
+drug_matches = klaeger_cids %>% 
+    mutate(cid = as.character(cid)) %>%
+    inner_join(okl_cids_all, by = c("cid" = "cid")) %>% 
+    dplyr::select(klaeger_name, query) %>% 
+    rename("okl_drug_name" = query,
+           "klaeger_drug_name" = klaeger_name)  %>% 
+    distinct()
+```
+
+#Match kinase names between datasets using gene symbols
+
+```{r}
+klaeger_gene_labels = read_csv(here('data/klaeger_data/klaeger_manual_gene_labels.csv')) %>% 
+	mutate(kinase = case_when(
+		class == 'Light' ~ 'kinase',
+		class == 'Dark' ~ 'kinase',
+		class == 'Non-kinase' ~ 'non-kinase',
+		T ~ 'NA'
+	))
+
+klaeger_strict_kinases = klaeger_gene_labels %>% 
+	filter(kinase == 'kinase') 
+
+mart <- useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+
+# list all attributes to find the ones we want
+listAttributes(mart)  %>% as.data.frame() -> test
+
+# Retrieve mapping between Entrez gene IDs and Uniprot IDs
+mapping <- getBM(attributes = c('entrezgene_id', 'uniprotswissprot', 'uniprot_gn_symbol'), mart = mart)
+
+# Remove entries with no Uniprot ID
+mapping <- mapping %>% filter(uniprotswissprot != "")
+
+
+# Match the okl_set to klaeger_set
+matched_kinases <- klaeger_kinases %>%  
+		mutate(gene_name = case_when(
+		gene_name == 'ADRBK1' ~ 'BARK1',
+		gene_name == 'CSNK2A1;CSNK2A3' ~ 'CSNK2A1',
+		gene_name == 'PASK' ~ 'STK39',
+		gene_name == 'PDPK1;PDPK2P' ~ 'PDPK1',
+		gene_name == 'PRKCE;PRKCH' ~ 'PRKCE',
+		gene_name == 'PRKCE;PRKCH' ~ 'PRKCH',
+		T ~ gene_name
+		)) %>%
+    inner_join(mapping, by = c("gene_name" = "uniprot_gn_symbol"))  %>% 
+    left_join(okl_kinase_names, by = 'entrezgene_id')  %>% 
+    filter(!is.na(okl_kinase_name)) %>% 
+	rename('klaeger_kinase_name' = gene_name)  %>% 
+    #removing in vitro kinase mutants used by eurofins by using the pattern "(letter number letter)"
+    filter(!str_detect(okl_kinase_name, pattern = "\\(?[A-Za-z]\\d{2,4}[A-Za-z]\\)?"))  %>% 
+    filter(!okl_kinase_name %in% c('FLT3(ITD)',
+                                    'ALK(1151Tins)',
+                                    'FLT3-autoinhibited',
+                                    'JAK1(JH2domain-pseudokinase)',
+                                    'KIT-autoinhibited',
+                                    'TYK2(JH2domain-pseudokinase)'))
+
+
+unmatched_klaeger_kinases = klaeger_strict_kinases %>% 
+	filter(!gene_name %in% matched_kinases$klaeger_kinase_name) %>% 
+	dplyr::select(gene_name)
+
+unmatched_okl_kinases = okl_kinase_names %>% 
+	filter(!okl_kinase_name %in% matched_kinases$okl_kinase_name) %>% 
+	dplyr::select(okl_kinase_name)
+
+
+```
