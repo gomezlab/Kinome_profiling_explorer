@@ -261,6 +261,32 @@ Heatmap(okl_matrix,
 dev.off()
 ```
 
+## Heatmap of inhibition values at 1uM for Klaeger
+```{r}
+png(here("figures/klaeger_heatmap.png"), width=3000, height=1600)
+# plot heatmap of inhibition values at 1uM
+klaeger_matrix  = okl_klaeger_combined %>%
+  filter(origin == "klaeger") %>%
+  filter(concentration_M == 1 * 10^(-6)) %>%
+  select(drug, kinase, relative_intensity) %>%
+  group_by(drug, kinase) %>%
+  summarise(mean_relative_intensity = mean(relative_intensity)) %>%
+  ungroup()  %>% 
+  pivot_wider(names_from = kinase, values_from = mean_relative_intensity) %>%
+  column_to_rownames("drug") %>%
+  as.matrix()
+
+Heatmap(okl_matrix, 
+        name = "Kinase\nInhibition", #title of legend
+        column_title = "Kinases", row_title = "Drugs",
+        row_title_gp = grid::gpar(fontsize = 15) ,
+        column_names_gp = grid::gpar(fontsize = 15),
+        heatmap_legend_param = list(title_gp = grid::gpar(fontsize = 15)),
+        )
+dev.off()
+
+```
+
 ```{r}
 # prep klaeger_combo data for UMAP, filtering to only include 1uM
 klaeger_combinations_for_umap <- klaeger_combinations %>%
