@@ -254,9 +254,9 @@ okl_matrix  = okl_klaeger_combined %>%
 Heatmap(okl_matrix, 
         name = "Kinase\nInhibition", #title of legend
         column_title = "Kinases", row_title = "Drugs",
-        row_title_gp = gpar(fontsize = 15) ,
-        column_names_gp = gpar(fontsize = 15),
-        heatmap_legend_param = list(title_gp = gpar(fontsize = 15)),
+        row_title_gp = grid::gpar(fontsize = 15) ,
+        column_names_gp = grid::gpar(fontsize = 15),
+        heatmap_legend_param = list(title_gp = grid::gpar(fontsize = 15)),
         )
 dev.off()
 ```
