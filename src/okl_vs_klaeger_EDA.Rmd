@@ -238,6 +238,7 @@ ggsave(here("figures/kinase_coverage.png"), width = 45, height = 10, units = "cm
 
 ## Heatmap of inhibition values at 1uM for OKL
 ```{r}
+png(here("figures/okl_heatmap.png"), width=3000, height=1600)
 # plot heatmap of inhibition values at 1uM
 okl_matrix  = okl_klaeger_combined %>%
   filter(origin == "okl") %>%
@@ -255,7 +256,7 @@ Heatmap(okl_matrix,
         column_title = "Kinases", row_title = "Drugs",
         row_names_gp = gpar(fontsize = 7) # Text size for row names
         )
-ggsave(here("figures/okl_heatmap.png"), width = 50, height = 40, units = "cm")
+dev.off()
 ```
 
 ```{r}
