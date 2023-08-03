@@ -1,0 +1,394 @@
+```{r}
+library(tidyverse)
+library(here)
+library(DarkKinaseTools)
+library(ggvenn)
+library(ComplexHeatmap)
+```
+
+## Read in data
+
+```{r}
+all_kinases <- all_kinases
+okl_profiling_data <- read_rds(here("results/okl_profiling_data.rds.gz"))
+klaeger_tidy <- read_rds(here("data/klaeger_data/klaeger_full_tidy.rds"))
+
+okl_klaeger_kinase_matches <- read_csv(here("results/matching/okl_klaeger_kinase_matches.csv"))
+okl_klaeger_drug_matches <- read_csv(here("results/matching/okl_klaeger_drug_matches.csv"))
+```
+
+## Build Combined Dataset for Comparison
+```{r}
+head(okl_profiling_data) %>% view()
+
+okl_klaeger_combined <- okl_profiling_data %>%
+  mutate(
+    concentration_M = concentration_nM / 1000000000,
+    percent_control = percent_control / 100,
+    origin = "okl"
+  ) %>%
+  rename(
+    kinase = entrez_gene_symbol,
+    relative_intensity = percent_control
+  ) %>%
+  select(drug, kinase, concentration_M, relative_intensity, origin) %>%
+  full_join(klaeger_tidy %>% mutate(origin = "klaeger"), by = c("drug" = "drug", "concentration_M" = "concentration_M", "kinase" = "gene_name", "relative_intensity" = "relative_intensity", "origin" = "origin"))
+```
+
+
+## Build Matched Dataset
+```{r}
+# find dose matches for each dataset
+
+klaeger_doses <- klaeger_tidy %>%
+  select(concentration_M) %>%
+  filter(concentration_M != 0) %>%
+  unique()
+
+okl_doses <- okl_profiling_data %>%
+  mutate(concentration_M = concentration_nM / 1000000000) %>%
+  group_by(concentration_M) %>%
+  summarise(n = n())
+
+exact_dose_matches <- okl_doses %>%
+  inner_join(klaeger_doses)
+
+# build comparative dataset combing both datasets
+
+okl_klaeger_exact_matched <- okl_profiling_data %>%
+  mutate(concentration_M = concentration_nM / 1000000000) %>%
+  filter(concentration_M %in% exact_dose_matches$concentration_M) %>%
+  inner_join(okl_klaeger_drug_matches, by = c("drug" = "okl_drug_name")) %>%
+  inner_join(okl_klaeger_kinase_matches, by = c("entrez_gene_symbol" = "okl_kinase_name")) %>%
+  select(drug, klaeger_drug_name, concentration_M, discoverx_gene_symbol, entrez_gene_symbol, percent_control) %>%
+  inner_join(klaeger_tidy, by = c("klaeger_drug_name" = "drug", "concentration_M" = "concentration_M", "entrez_gene_symbol" = "gene_name")) %>%
+  mutate(percent_control = percent_control / 100)
+```
+
+# EDA 
+
+## Drug number in Each Dataset 
+```{r}
+# Number of unique drugs overall in each dataset
+okl_klaeger_drug_numbers <- okl_klaeger_combined %>%
+  group_by(origin) %>%
+  summarise(n = n_distinct(drug)) %>%
+  mutate(origin = if_else(origin == "okl", "OKL Drugs", "Klaeger Drugs"))
+
+okl_klaeger_drug_numbers %>%
+  ggplot(aes(
+    x = origin,
+    y = n,
+    fill = origin
+  )) +
+  geom_col() +
+  labs(y = "Count", title = "Drug Number Comparison") +
+  theme(
+    axis.title.x = element_blank(),
+    legend.position = "none",
+    legend.direction = "horizontal",
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    plot.background = element_rect(fill = "transparent", colour = NA)
+  )
+```
+
+## Unique Drugs Not in Klaeger
+```{r}
+# Number of unique drugs in OKL not in Klaeger
+okl_drugs <- c(
+  okl_klaeger_drug_matches %>%
+    pull(klaeger_drug_name),
+  okl_profiling_data %>%
+    filter(!drug %in% okl_klaeger_drug_matches$okl_drug_name) %>%
+    pull(drug) %>%
+    unique()
+) %>%
+  unique()
+
+klaeger_drugs <- klaeger_tidy %>%
+  pull(drug) %>%
+  unique()
+
+list_of_drugs <- list("OKL Drugs" = okl_drugs, "Klaeger Drugs" = klaeger_drugs)
+
+# plot venn diagram
+ggvenn(list_of_drugs, c("OKL Drugs", "Klaeger Drugs"), set_name_size = 15, text_size = 12) +
+  theme(
+    legend.position = "none",
+    legend.direction = "horizontal",
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    plot.background = element_rect(fill = "transparent", colour = NA)
+  )
+```
+
+## Kinase Number in Each Dataset
+
+```{r}
+# Number of unique kinases overall in each dataset
+okl_klaeger_kinase_numbers <- okl_klaeger_combined %>%
+  filter(kinase %in% all_kinases$symbol) %>%
+  group_by(origin) %>%
+  summarise(n = n_distinct(kinase)) %>%
+  mutate(origin = if_else(origin == "okl", "OKL Kinases", "Klaeger Kinases"))
+
+okl_klaeger_all_protein_numbers <- okl_klaeger_combined %>%
+  group_by(origin) %>%
+  summarise(n = n_distinct(kinase)) %>%
+  filter(origin == "klaeger") %>%
+  mutate(origin = "Klaeger All Proteins")
+
+all_okl_klaeger_kinase_numbers <- okl_klaeger_kinase_numbers %>%
+  bind_rows(okl_klaeger_all_protein_numbers) %>%
+  arrange(desc(n)) %>%
+  mutate(origin = fct_inorder(origin))
+
+all_okl_klaeger_kinase_numbers %>%
+  ggplot(aes(
+    x = origin,
+    y = n,
+    fill = origin
+  )) +
+  geom_col() +
+  labs(y = "Count", title = "Target Number Comparison") +
+  theme(
+    axis.title.x = element_blank(),
+    legend.position = "none",
+    legend.direction = "horizontal",
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    plot.background = element_rect(fill = "transparent", colour = NA)
+  )
+```
+
+## Unique Kinases Not in Klaeger
+```{r}
+# Number of unique kinases in OKL not in Klaeger
+okl_kinases <- c(
+  okl_klaeger_kinase_matches %>%
+    pull(klaeger_kinase_name),
+  okl_profiling_data %>%
+    filter(!entrez_gene_symbol %in% okl_klaeger_kinase_matches$entrez_gene_symbol) %>%
+    pull(entrez_gene_symbol) %>%
+    unique()
+) %>%
+  unique()
+
+klaeger_kinases <- klaeger_tidy %>%
+  pull(gene_name) %>%
+  unique()
+
+list_of_kinases <- list("OKL Kinases" = okl_kinases, "Klaeger Kinases (and other proteins)" = klaeger_kinases)
+
+# plot venn diagram
+ggvenn(list_of_kinases, c("OKL Kinases", "Klaeger Kinases (and other proteins)"), set_name_size = 15, text_size = 12) +
+  theme(
+    legend.position = "none",
+    legend.direction = "horizontal",
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    plot.background = element_rect(fill = "transparent", colour = NA)
+  )
+```
+
+## Mean Inhibition per Kinase in Each Dataset
+```{r}
+# count number of kinases in each dataset inhibited over 50% at 1uM
+
+kinase_coverages <- okl_klaeger_combined %>%
+  filter(concentration_M == 1 * 10^(-6)) %>%
+  filter(kinase %in% all_kinases$symbol) %>%
+  rename(activity = relative_intensity) %>%
+  mutate(inhibition = (1 - activity) * 100) %>%
+  mutate(inhibition = if_else(inhibition <= 50, FALSE, TRUE)) %>%
+  group_by(origin, kinase) %>%
+  summarise(mean_inhibition = mean(inhibition)) %>%
+  mutate(hit = if_else(mean_inhibition > 0, "hit", "non-hit"))
+
+kinase_coverages %>%
+  mutate(origin = if_else(origin == "okl", "OKL", "Klaeger")) %>%
+  ggplot(aes(x = kinase, y = mean_inhibition, fill = origin)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = c("red", "blue")) +
+  labs(
+    title = "Kinase Coverage",
+    x = "Kinase",
+    y = "Mean Inhibition",
+    fill = "Origin"
+  ) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.background = element_rect(fill = "transparent", colour = NA),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    plot.background = element_rect(fill = "transparent", colour = NA),
+    plot.title = element_text(hjust = 0.5)
+  )
+ggsave(here("figures/kinase_coverage.png"), width = 45, height = 10, units = "cm")
+```
+
+## Heatmap of inhibition values at 1uM for OKL
+```{r}
+# plot heatmap of inhibition values at 1uM
+okl_matrix  = okl_klaeger_combined %>%
+  filter(origin == "okl") %>%
+  filter(concentration_M == 1 * 10^(-6)) %>%
+  select(drug, kinase, relative_intensity) %>%
+  group_by(drug, kinase) %>%
+  summarise(mean_relative_intensity = mean(relative_intensity)) %>%
+  ungroup()  %>% 
+  pivot_wider(names_from = kinase, values_from = mean_relative_intensity) %>%
+  column_to_rownames("drug") %>%
+  as.matrix()
+
+Heatmap(okl_matrix, 
+        name = "Kinase\nInhibition", #title of legend
+        column_title = "Kinases", row_title = "Drugs",
+        row_names_gp = gpar(fontsize = 7) # Text size for row names
+        )
+ggsave(here("figures/okl_heatmap.png"), width = 50, height = 40, units = "cm")
+```
+
+```{r}
+# prep klaeger_combo data for UMAP, filtering to only include 1uM
+klaeger_combinations_for_umap <- klaeger_combinations %>%
+  mutate(treatment = paste0(drug1, " + ", drug2)) %>%
+  select(-concentration_M_d1, -concentration_M_d2, -drug1, -drug2) %>%
+  mutate(origin = "Combination Therapy")
+
+# prep klaeger monotherapy data for UMAP, filtering to only include 1uM
+klaeger_monotherapy_for_umap <- klaeger_tidy %>%
+  filter(concentration_M == 1 * 10^(-6)) %>%
+  rename(treatment = drug) %>%
+  mutate(gene_name = paste0("act_", gene_name)) %>%
+  # pivot to wide
+  pivot_wider(names_from = gene_name, values_from = relative_intensity) %>%
+  select(-concentration_M) %>%
+  mutate(origin = "Monotherapy")
+
+# Combine monotherapy and combo data
+
+klaeger_for_umap <- klaeger_combinations_for_umap %>%
+  bind_rows(klaeger_monotherapy_for_umap) %>%
+  mutate(id = row_number())
+
+# remove kinases with zero variance
+zv_kinases <- klaeger_for_umap %>%
+  select(starts_with("act_")) %>%
+  pivot_longer(everything(), names_to = "kinase", values_to = "relative_intensity") %>%
+  group_by(kinase) %>%
+  summarise(var = var(relative_intensity)) %>%
+  filter(var == 0)
+```
+
+```{r}
+# Perform UMAP on klaeger monotherapy data
+
+klaeger_for_umap_meta <- klaeger_for_umap %>%
+  select(id, treatment, origin)
+
+set.seed(2222)
+klaeger_umap_fit <- klaeger_for_umap %>%
+  select(id, starts_with("act_")) %>%
+  column_to_rownames("id") %>%
+  select(-any_of(zv_kinases$kinase)) %>%
+  scale() %>%
+  as.data.frame() %>%
+  drop_na() %>%
+  as.matrix() %>%
+  umap()
+
+klaeger_umap_df <- klaeger_umap_fit$layout %>%
+  as.data.frame() %>%
+  rename(
+    UMAP1 = "V1",
+    UMAP2 = "V2"
+  ) %>%
+  mutate(id = row_number()) %>%
+  inner_join(klaeger_for_umap_meta, by = "id")
+```
+
+```{r}
+# make klaeger monotherapy vs combo therapy umap plot
+klaeger_umap_df %>%
+  ggplot(aes(
+    x = UMAP1,
+    y = UMAP2,
+    colour = origin
+  )) +
+  geom_jitter() +
+  scale_colour_brewer(type = "qual") +
+  # facet_wrap(vars(origin), scales = "free") +
+  labs(
+    x = "UMAP1",
+    y = "UMAP2",
+    colour = "Treatment Type",
+    title = "Kinome Target Space"
+  ) +
+  theme(
+    legend.position = "right",
+    legend.text = element_text(size = 9),
+    legend.background = element_rect(fill = "transparent", colour = NA),
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    plot.background = element_rect(fill = "transparent", colour = NA)
+  )
+
+ggsave(here("figures/clustering/combo_vs_monotherapy_kinome_space_UMAP.png"), width = 21, height = 12, units = "cm")
+```
+
+```{r}
+# Monotherapy vs combo EDA by CORAL
+
+monotherapy_EDA_data <- klaeger_tidy %>%
+  filter(concentration_M == 1 * 10^(-6)) %>%
+  rename(activity = relative_intensity) %>%
+  mutate(inhibition = (1 - activity) * 100) %>%
+  mutate(inhibition = if_else(inhibition < 0, 0, inhibition)) %>%
+  rename(kinase = gene_name) %>%
+  group_by(kinase) %>%
+  summarise(mean_inhibition = mean(inhibition)) %>%
+  mutate(hit = if_else(mean_inhibition > 0, "hit", "non-hit")) %>%
+  write_csv(here("results/ALMANAC_klaeger_johnson_models/breast_cancer_models/klaeger_mono_EDA_for_CORAL.csv"))
+
+combo_EDA_data <- klaeger_combinations %>%
+  select(starts_with("act_")) %>%
+  pivot_longer(everything(), names_to = "kinase", values_to = "activity") %>%
+  mutate(inhibition = (1 - activity) * 100) %>%
+  mutate(kinase = gsub("act_", "", kinase)) %>%
+  group_by(kinase) %>%
+  summarise(mean_inhibition = mean(inhibition)) %>%
+  mutate(hit = if_else(mean_inhibition > 0, "hit", "non-hit")) %>%
+  write_csv(here("results/ALMANAC_klaeger_johnson_models/breast_cancer_models/klaeger_combo_EDA_for_CORAL.csv"))
+```
+
+```{r}
+# find nearest doses
+NCI_unmatched_doses <- NCI_doses %>%
+  filter(!CONCENTRATION %in% dose_matches$NCI_dose)
+
+
+nearest_klaeger_concentration <- function(this_concentration, all_klaeger_concentrations) {
+  differences <- all_klaeger_concentrations %>%
+    mutate("difference" = abs(this_concentration - concentration_M)) %>%
+    arrange(difference)
+  min_difference <- differences$concentration_M[1]
+  return(min_difference)
+}
+
+NCI_nearest_klaeger_doses <- NCI_unmatched_doses %>%
+  mutate(nearest_klaeger_dose = map(CONCENTRATION, ~ nearest_klaeger_concentration(., klaeger_log_doses))) %>%
+  as.data.frame() %>%
+  unnest(cols = c(nearest_klaeger_dose)) %>%
+  select(-n)
+```

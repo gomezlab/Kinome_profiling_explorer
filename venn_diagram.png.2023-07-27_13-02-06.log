@@ -1,0 +1,12 @@
+INFO [2023-07-27 13:02:06] $x
+INFO [2023-07-27 13:02:06] list(values_dataset1 %>% unlist(), values_dataset2 %>% unlist())
+INFO [2023-07-27 13:02:06] 
+INFO [2023-07-27 13:02:06] $category.names
+INFO [2023-07-27 13:02:06] c("Dataset 1", "Dataset 2")
+INFO [2023-07-27 13:02:06] 
+INFO [2023-07-27 13:02:06] $filename
+INFO [2023-07-27 13:02:06] [1] "venn_diagram.png"
+INFO [2023-07-27 13:02:06] 
+INFO [2023-07-27 13:02:06] $output
+INFO [2023-07-27 13:02:06] [1] TRUE
+INFO [2023-07-27 13:02:06] 

@@ -44,7 +44,8 @@ drug_matches = klaeger_cids %>%
     dplyr::select(klaeger_name, query) %>% 
     rename("okl_drug_name" = query,
            "klaeger_drug_name" = klaeger_name)  %>% 
-    distinct()
+    distinct()  %>% 
+	write_csv(here('results/matching/okl_klaeger_drug_matches.csv'))
 ```
 
 #Match kinase names between datasets using gene symbols
@@ -95,7 +96,8 @@ matched_kinases <- klaeger_kinases %>%
                                     'FLT3-autoinhibited',
                                     'JAK1(JH2domain-pseudokinase)',
                                     'KIT-autoinhibited',
-                                    'TYK2(JH2domain-pseudokinase)'))
+                                    'TYK2(JH2domain-pseudokinase)'))  %>% 
+	write_csv(here('results/matching/okl_klaeger_kinase_matches.csv'))
 
 
 unmatched_klaeger_kinases = klaeger_strict_kinases %>% 
