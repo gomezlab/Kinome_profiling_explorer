@@ -276,7 +276,7 @@ klaeger_matrix  = okl_klaeger_combined %>%
   column_to_rownames("drug") %>%
   as.matrix()
 
-Heatmap(okl_matrix, 
+Heatmap(klaeger_matrix, 
         name = "Kinase\nInhibition", #title of legend
         column_title = "Kinases", row_title = "Drugs",
         row_title_gp = grid::gpar(fontsize = 15) ,
