@@ -6,10 +6,10 @@ library(here)
 
 ```{r}
 # read in data
-compound_dictionary <- read_fst(here("data/lsp_compound_dictionary.fst"))
-profiling_data_1 = read_csv(here("data/24-sample-set-10uM-100nM-US073-0016938-O_HAR004-01-p-00001-000-00_scanMAX_Data Report.csv"))
-profiling_data_2 = read_csv(here("data/184-sample-set-1uM-12.5nM-US073-0018693-O_HAR005-01-p-00001-000-00_scanMAX_Data Report.csv"))
-profiling_data_3 = read_csv(here("data/184-sample-set-US073-0016937-O_HAR001-01-p-00001-000-00_scanMAX_Data Report.csv"))
+compound_dictionary <- read_fst(here("data/okl_profiling_data/lsp_compound_dictionary.fst"))
+profiling_data_1 = read_csv(here("data/okl_profiling_data/24-sample-set-10uM-100nM-US073-0016938-O_HAR004-01-p-00001-000-00_scanMAX_Data Report.csv"))
+profiling_data_2 = read_csv(here("data/okl_profiling_data/184-sample-set-1uM-12.5nM-US073-0018693-O_HAR005-01-p-00001-000-00_scanMAX_Data Report.csv"))
+profiling_data_3 = read_csv(here("data/okl_profiling_data/184-sample-set-US073-0016937-O_HAR001-01-p-00001-000-00_scanMAX_Data Report.csv"))
 ```
 
 ```{r}

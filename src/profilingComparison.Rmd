@@ -1,0 +1,136 @@
+---
+title: "Okl/Kla Data"
+output: html_document
+date: "2023-11-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(webchem)
+library(here)
+```
+
+## R Markdown
+
+Given two databases, one each for OKL and Klaegar drug data, we begin with importing the databases and determining unique CIDs and drug names for the set of trials corresponding to each drug.
+
+```{r Import, include=FALSE}
+okl<-read_rds(here("results/okl_profiling_data.rds.gz"))
+kla <- read_rds(here("data/klaeger_data/klaeger_full_tidy.rds"))
+
+okl_cids <- get_cid(unique(okl$drug), from ="name", domain="compound", match = "all", verbose = T)
+kla_cids <- get_cid(unique(kla$drug), from="name", domain="compound", match="all", verbose = T)
+
+okl_cids$query <- tolower(okl_cids$query)
+kla_cids$query <- tolower(kla_cids$query)
+
+okl_drugName <- as_tibble(tolower(okl_cids$query))
+kla_drugName <- as_tibble(tolower(kla_cids$query))
+
+okl_drugCID <- as_tibble(okl_cids$cid)
+kla_drugCID <- as_tibble(kla_cids$cid)
+```
+
+
+We can then determine values that are used for both OKl and Klaeger trials by applying the dplyr databse. 
+Some values will slip through due to not being defined with a CID value initially so must be caught in an additional tibble.
+
+``` {r Intersection, include=FALSE}
+validDrug = semi_join(okl_cids,kla_cids)
+validCID = semi_join(okl_drugCID,kla_drugCID)
+validName = semi_join(okl_drugName,kla_drugName)
+
+validCID<-na.omit(validCID)
+
+extra <- anti_join(as_tibble(validCID),as_tibble(validDrug$cid))  %>% 
+    drop_na()
+```
+
+Now that we have the CID of values that may not have had a listed CID value or have used different names between the trials, we can collect the specific names ascribed to these products in both trials.
+
+``` {r Extra, include=FALSE}
+oklFiltered <- okl_cids %>% 
+    filter(cid %in% extra$value)  
+
+klaFiltered <- kla_cids  %>% 
+    filter(cid %in% extra$value)
+
+oklNames <- as_tibble(c(validDrug$query,oklFiltered$query))
+klaNames <- as_tibble(c(validDrug$query,klaFiltered$query))
+
+klaContained <- kla[tolower(kla$drug) %in% klaNames$value, ]
+oklContained <- okl[tolower(okl$drug) %in% oklNames$value, ]
+```
+
+We can turn our attention to the actual genes the drug products interact with, and must arrange this data into a mutable tibble. 
+The concentrations also need to be accounted for due to the difference in units and quantity for each drug/gene combination in both trials.
+
+``` {r Genes, include=FALSE}
+oklGene <- as_tibble(c(oklContained$discoverx_gene_symbol,oklContained$entrez_gene_symbol))
+klaGene <- as_tibble(klaContained$gene_name)
+
+validGene <- semi_join(unique(oklGene),klaGene,by=NULL,copy=FALSE,na_matches="na")
+
+klaContained$concentration_M <- klaContained$concentration_M * 1e9
+
+conc = as_tibble(c(100,1000))
+
+oklContainedDiscover <- oklContained[oklContained$discoverx_gene_symbol %in% validGene$value, ]
+oklContainedEntrez <- oklContained[oklContained$entrez_gene_symbol %in% validGene$value,]
+klaContained <- klaContained[klaContained$gene_name %in% validGene$value, ]
+```
+
+To check the difference between the data obtained from both gene sets for Okl, we can use the setdiff() function. 
+DiscPrimary denotes all values in oklContainedDiscover not in oklContainedEntrez
+EntrPrimary denotes all values in oklContainedEntrez not in oklContainedDiscover.
+Further analysis shows that for this database, oklContainedEntrez is empty, implying data in oklContainedEntrez is redundant. 
+
+``` {r DiffCheck, include=FALSE}
+DiscPrimary -> setdiff(oklContainedDiscover,oklContainedEntrez)
+EntrPrimary -> setdiff(oklContainedEntrez,oklContainedDiscover)
+
+oklContained <- oklContainedDiscover[oklContainedDiscover$concentration_nM %in% conc$value, ]
+klaContained <- klaContained[klaContained$concentration_M %in% conc$value, ]
+
+
+```
+
+Verifying the similarities and overlap between the Okl and Kla databases will be needed and will use the intersect function. 
+We will also need to finally identify each trials individual data for matching parameters.
+
+``` {r Checker}
+oklFil <- as_tibble(bind_cols(oklContained$drug,oklContained$discoverx_gene_symbol,oklContained$concentration_nM))
+klaFil <- as_tibble(bind_cols(klaContained$drug,klaContained$gene_name,klaContained$concentration_M))
+
+inter <- intersect(oklFil,klaFil)
+
+KlaF <- klaFil[toupper(klaFil$...1) %in% toupper(klaFiltered$query), ]
+OklF <- oklFil[toupper(oklFil$...1) %in% toupper(oklFiltered$query), ]
+
+sameGC <- select(OklF,-c(1))
+KlaF <- inner_join(KlaF,sameGC,by=join_by("...2"=="...2","...3"=="...3"),copy=FALSE,suffix=c(".x",".y"),keep=FALSE,na_matches = "na")
+KlaF<-distinct(KlaF)
+
+KlaFincomplete <- filter(KlaF,...1 == "PD-325901" & ...3 == 1000)
+KlaF <- anti_join(KlaF,KlaFincomplete,by=NULL,copy=FALSE,na_matches = "na")
+
+oklComb <- bind_rows(as_tibble(inter),as_tibble(OklF))
+klaComb <- bind_rows(as_tibble(inter),as_tibble(KlaF))
+```
+
+Now we combine these two datasets into a presentable form that contains all values we care about.
+
+``` {r Final Combination}
+oklComb <- rename(oklComb,"Okl Drug" = ...1,"Kinase" = ...2,"Concentration (nM)" = ...3)
+klaComb <- rename(klaComb,"Kla Drug" = ...1,"Kinase" = ...2,"Concentration (nM)" = ...3)
+
+final <- as_tibble(bind_cols(oklComb$`Okl Drug`,klaComb$`Kla Drug`,klaComb$Kinase,klaComb$`Concentration (nM)`))
+final <- inner_join(final,klaFil,by=join_by("...2"=="drug","...3"=="gene_name","...4"=="concentration_M"),copy=FALSE,suffix=c(".x",".y"),keep=FALSE,na_matches="na")
+final <- inner_join(final,oklFil,by=join_by("...1"=="drug","...3"=="discoverx_gene_symbol","...4"=="concentration_nM"),copy=FALSE,suffix=c(".x",".y"),keep=FALSE,na_matches="na")
+final <- rename(fin2,"Okl Drug"=...1,"Klaegar Drug"=...2,"Kinase"=...3,"Concentration (nM)"=...4)
+
+saveRDS(final,file="profilingComparison.rds")
+```
+
+The final tibble is denoted by 'final' and can be saved to a .rds file.

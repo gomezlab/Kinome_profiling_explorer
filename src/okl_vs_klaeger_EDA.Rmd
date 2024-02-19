@@ -9,7 +9,8 @@ library(ComplexHeatmap)
 ## Read in data
 
 ```{r}
-all_kinases <- all_kinases
+all_kinases <- all_kinases  %>% 
+  write_csv(here("results/all_kinases.csv"))
 okl_profiling_data <- read_rds(here("results/okl_profiling_data.rds.gz"))
 klaeger_tidy <- read_rds(here("data/klaeger_data/klaeger_full_tidy.rds"))
 
