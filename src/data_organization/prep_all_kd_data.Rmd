@@ -1,0 +1,527 @@
+```{r setup, include=FALSE}
+library(tidyverse)
+library(here)
+library(webchem)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(dplyr)
+library(conflicted)
+library(fst)
+library(ChemmineR)
+library(VennDiagram)
+library(wesanderson)
+library(ggupset)
+conflicts_prefer(select::dplyr)
+conflicts_prefer(slice::dplyr)
+conflicts_prefer(clusterProfiler::select)
+conflicts_prefer(clusterProfiler::rename)
+conflicts_prefer(clusterProfiler::filter)
+conflicts_prefer(base::setdiff)
+conflicts_prefer(tibble::view)
+conflicts_prefer(dplyr::first)
+```
+
+# processing kinobeads data
+
+## new kuster data
+```{r}
+kuster <- read_csv(here("data/new_kuster_data/kds.csv"))
+kuster_compound_info_tool = read_csv(here("data/new_kuster_data/compound_info.csv"))
+kuster_compound_info_clinical = read_csv(here("data/new_kuster_data/compound_info_clinical.csv"))
+
+kuster_compound_info = bind_rows(kuster_compound_info_tool, kuster_compound_info_clinical  %>% rename(Compound = Drug))  %>% 
+    select(Compound, SMILES)
+
+kuster_compound_cid = get_cid(unique(kuster_compound_info$SMILES), from = "smiles", domain = "compound", match = "all", verbose = T)
+
+kuster_compound_info = kuster_compound_info  %>% 
+    left_join(kuster_compound_cid, by = c("SMILES" = "query"))  %>% 
+    select(Compound, SMILES, cid)
+
+kuster_processed = kuster  %>% 
+    rename(Kinase = `Gene name`, Kd = `apparent Kd`)  %>% 
+    left_join(kuster_compound_info, by = "Compound")  %>% 
+    select(Kinase, Compound, SMILES, cid, Kd) %>%
+    filter(!is.na(Kd))
+```
+
+# processing klaeger data
+```{r}
+
+klaeger_compound_info = read_csv(here("data/klaeger_data/klaeger_compound_info.csv"))  %>% 
+    select(Compound = Drug, SMILES = `SMILES code`, cid = PubChemCID)
+
+klaeger_processed = read_csv(here("data/klaeger_data/apparent_kd_values.csv"))  %>% 
+    select(Compound = Drug, Kinase = Target, Kd = At)  %>% 
+    left_join(klaeger_compound_info, by = "Compound")
+```
+
+# processing LINCS data
+```{r}
+
+kinomescan_protein_info = read_csv(here("data/okl_profiling_data/eurofins_kinase_info.csv"))
+
+LINCS_processed = read_csv(here("data/LINCS_data/LINCS_KINOMEscan_Kd.csv"))  %>% 
+    select(Kinase = `Protein Name`, Compound = `Small Molecule Name`, Kd)  %>% 
+    filter(!is.na(Kd))  %>% 
+    left_join(kinomescan_protein_info  %>% select(`DiscoveRx Gene Symbol`, `Entrez Gene Symbol`), by = c("Kinase" = "DiscoveRx Gene Symbol"))  %>%
+    rename(entrez_gene_symbol = `Entrez Gene Symbol`) 
+
+```
+
+# processing OKL data
+```{r}
+
+okl_compound_info = read_fst(here("data/okl_profiling_data/lsp_compound_dictionary.fst"))  %>% 
+    select(Compound = pref_name, inchi)  %>% 
+    distinct()  %>%
+    drop_na()
+
+okl_processed = read_csv(here("data/okl_profiling_data/okl_eurofins_pseudo_ic50.csv")) %>% 
+    select(Kinase = `DiscoveRx Gene Symbol`, Compound = name, Kd = pseudo_ic50, entrez_gene_symbol = `Entrez Gene Symbol`)  %>% 
+    left_join(okl_compound_info, by = "Compound")
+
+okl_cid = pubchemInchi2cid(okl_processed$inchi  %>% unique())
+
+okl_processed_compound_info = okl_processed  %>% 
+    select(Compound, inchi)  %>%
+    distinct()  %>% 
+    bind_cols(cid = okl_cid)
+
+okl_processed = okl_processed  %>% 
+    left_join(okl_processed_compound_info, by = "Compound")  %>% 
+    select(Kinase, Compound, Kd, entrez_gene_symbol, cid)
+
+```
+
+# Use bitr to convert gene symbols to entrez gene ids for all datasets
+```{r}
+kuster_entrez = bitr(kuster_processed$Kinase, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+kuster_processed_entrez = kuster_processed  %>% 
+    left_join(kuster_entrez, by = c("Kinase" = "SYMBOL"))  %>% 
+    select(Kinase, Compound, SMILES, Kd, ENTREZID, cid)
+
+klaeger_entrez = bitr(klaeger_processed$Kinase, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+klaeger_processed_entrez = klaeger_processed  %>% 
+    left_join(klaeger_entrez, by = c("Kinase" = "SYMBOL"))  %>% 
+    select(Kinase, Compound, Kd, ENTREZID, cid)
+
+LINCS_entrez = bitr(LINCS_processed$entrez_gene_symbol, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+LINCS_processed_entrez = LINCS_processed  %>% 
+    left_join(LINCS_entrez, by = c("entrez_gene_symbol" = "SYMBOL"))  %>% 
+    select(Kinase, Compound, Kd, ENTREZID)
+
+okl_entrez = bitr(okl_processed$entrez_gene_symbol, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+okl_processed_entrez = okl_processed  %>% 
+    left_join(okl_entrez, by = c("entrez_gene_symbol" = "SYMBOL"))  %>% 
+    select(Kinase, Compound, Kd, ENTREZID, cid)
+
+```
+
+# CIDs for all datasets
+```{r}
+
+kuster_entrez_cid = kuster_processed_entrez  %>% 
+    select(Kinase, Compound, Kd, ENTREZID, cid)  %>% 
+    mutate(dataset = "kuster", cid = as.character(cid))
+
+klaeger_entrez_cid = klaeger_processed_entrez  %>% 
+    select(Kinase, Compound, Kd, ENTREZID, cid)  %>% 
+    mutate(dataset = "klaeger", cid = as.character(cid))
+
+LINCS_cids = get_cid(unique(LINCS_processed_entrez$Compound), from = "name", domain = "compound", match = "all", verbose = T)
+
+LINCS_entrez_cid = LINCS_processed_entrez  %>% 
+    left_join(LINCS_cids, by = c("Compound" = "query"))  %>% 
+    select(Kinase, Compound, Kd, ENTREZID, cid)  %>% 
+    mutate(dataset = "LINCS", cid = as.character(cid))
+
+okl_entrez_cid = okl_processed_entrez  %>% 
+    select(Kinase, Compound, Kd, ENTREZID, cid)  %>% 
+    mutate(dataset = "okl", cid = as.character(cid))
+
+```
+
+# Combine all datasets
+```{r}
+combined_dataset = bind_rows(kuster_entrez_cid, klaeger_entrez_cid, LINCS_entrez_cid, okl_entrez_cid)  %>%  
+    select(Kinase, Compound, Kd, ENTREZID, cid, dataset)  %>% 
+    filter(!is.na(Kd))  %>% 
+    write_csv(here("data/combined_kd_data.csv"))
+```
+
+# Venn diagram of compounds in each dataset
+```{r}
+
+combined_dataset = read_csv(here("data/combined_kd_data.csv"))
+
+dataset_for_plot = combined_dataset  %>% 
+    select(cid, dataset)  %>% 
+    distinct()  %>% 
+    filter(cid != 0)  %>% 
+    drop_na()
+
+# Split the dataset by the 'dataset' column to get unique compounds from each original dataset
+datasets_split <- split(dataset_for_plot, dataset_for_plot$dataset)
+
+# Get unique compounds for each dataset
+unique_compounds <- lapply(datasets_split, function(df) unique(df$cid))
+
+# Prepare a named list for VennDiagram 
+list_for_venn <- setNames(unique_compounds, names(unique_compounds))
+
+#use wesanderson palette
+myCol <- wes_palette("Zissou1", 4)
+
+# Generate and plot the Venn diagram (for 4 datasets, a quad Venn diagram)
+venn.plot <- venn.diagram(
+  x = list_for_venn,
+  filename = here("figures/venn_diagram_kd_data.png"),
+  category.names = names(list_for_venn),
+  output = TRUE,
+    # Output features
+    imagetype="png" ,
+    height = 1480 , 
+    width = 1480 , 
+    resolution = 300,
+  #plot features
+  lwd = 2,
+  lty = "blank",
+  fill = myCol,
+  cex = .6,
+  fontface = "bold",
+  fontfamily = "sans"
+)
+
+dev.off()  
+```
+
+# Venn diagram of kinases in each dataset
+```{r}
+
+combined_dataset = read_csv(here("data/combined_kd_data.csv"))
+
+dataset_for_plot = combined_dataset  %>% 
+    select(ENTREZID, dataset)  %>% 
+    distinct()  %>% 
+    drop_na()
+
+# Split the dataset by the 'dataset' column to get unique compounds from each original dataset
+datasets_split <- split(dataset_for_plot, dataset_for_plot$dataset)
+
+# Get unique compounds for each dataset
+unique_compounds <- lapply(datasets_split, function(df) unique(df$ENTREZID))
+
+# Prepare a named list for VennDiagram 
+list_for_venn <- setNames(unique_compounds, names(unique_compounds))
+
+#use wesanderson palette
+myCol <- wes_palette("Zissou1", 4)
+
+# Generate and plot the Venn diagram (for 4 datasets, a quad Venn diagram)
+venn.plot <- venn.diagram(
+  x = list_for_venn,
+  filename = here("figures/kinase_venn_diagram_kd_data.png"),
+  category.names = names(list_for_venn),
+  output = TRUE,
+    # Output features
+    imagetype="png" ,
+    height = 1480 , 
+    width = 1480 , 
+    resolution = 300,
+  #plot features
+  lwd = 2,
+  lty = "blank",
+  fill = myCol,
+  cex = .6,
+  fontface = "bold",
+  fontfamily = "sans"
+)
+
+dev.off()  # This turns off the current device. You may need to run it multiple times.
+```
+
+
+## Upset plot of kinases in each dataset
+```{r}
+
+upset_data = combined_dataset  %>% 
+    select(ENTREZID, dataset)  %>% 
+    distinct()  %>% 
+    filter(!is.na(ENTREZID))  %>% 
+    group_by(ENTREZID)  %>%
+    summarise(dataset = list(dataset))  %>%
+    drop_na()
+
+# Create the UpSet plot
+ggplot(upset_data) +
+  geom_bar(aes(x = dataset)) +
+  scale_x_upset(n_intersections = 10) +
+  theme_minimal()
+```
+
+## Upset plot of compounds in each dataset
+```{r}
+
+upset_data = combined_dataset  %>% 
+    select(cid, dataset)  %>% 
+    distinct()  %>% 
+    filter(!is.na(cid))  %>% 
+    group_by(cid)  %>%
+    summarise(dataset = list(dataset))  %>%
+    drop_na()
+
+# Create the UpSet plot
+ggplot(upset_data) +
+  geom_bar(aes(x = dataset)) +
+  scale_x_upset(n_intersections = 10) +
+  theme_minimal()
+```
+
+# Combined dataset summarized by kinase-drug pair
+```{r}
+combined_dataset = read_csv(here("data/combined_kd_data.csv"))
+
+compound_info = combined_dataset  %>% 
+    select(Compound, cid)  %>%
+    mutate(cid = as.character(cid))  %>%
+    distinct()
+
+#check if there are any cids that have multiple compounds
+duplicate_compounds = compound_info  %>% 
+    group_by(cid)  %>% 
+    summarize(n = n())  %>% 
+    filter(n > 1)
+
+unique_cids <- unique(compound_info$cid)
+
+# Remove any NA or potentially invalid CIDs
+unique_cids <- unique_cids[!is.na(unique_cids)]
+
+# Updated function with error handling
+get_readable_synonym <- function(cid) {
+
+synonyms = pc_synonyms(cid, from = "cid", verbose = TRUE)
+
+first_synonym = synonyms %>% 
+    pluck(1)  %>% 
+    pluck(1)
+
+return(as.character(first_synonym))
+
+}
+
+# Use map_chr to apply the function and ensure character output
+#readable_synonyms <- map_chr(unique_cids, get_readable_synonym)
+
+# Create the data frame
+#readable_synonyms_df <- data.frame(cid = unique_cids, pubchem_name = readable_synonyms, stringsAsFactors = FALSE)
+
+#write_csv(readable_synonyms_df, here("results/combined_kd_compound_synonyms.csv"))
+readable_synonyms_df = read_csv(here("results/combined_kd_compound_synonyms.csv"))  %>% 
+    filter(!is.na(cid))  %>%
+    filter(cid != 0)  %>% 
+    mutate(cid = as.character(cid))
+
+compound_cid_info_smiles = pc_prop(compound_info$cid  %>% unique(), properties = c("CanonicalSMILES"))  %>% 
+    filter(!is.na(CID))  %>%
+    filter(CID != 0)
+
+combined_dataset_compound_info = combined_dataset  %>%
+    mutate(cid = as.character(cid))  %>%
+    left_join(readable_synonyms_df, by = c("cid"))  %>% 
+    left_join(compound_cid_info_smiles, by = c("cid" = "CID"))  %>%
+    mutate(pubchem_name = if_else(is.na(pubchem_name), Compound, pubchem_name))
+
+
+kinase_info = combined_dataset  %>% 
+    select(Kinase, ENTREZID)  %>% 
+    distinct()
+
+LINCS_kinase_info = read_csv(here("data/matching/LINCS_klaeger_kinase_matches.csv"))
+
+na_entrez = kinase_info  %>% 
+    filter(is.na(ENTREZID))  %>% 
+    select(-ENTREZID)  %>% 
+    left_join(LINCS_kinase_info, by = c("Kinase" = "LINCS_name"))  %>% 
+    left_join(kinase_info %>% drop_na(), by = c("klaeger_name" = "Kinase"))  %>%
+    mutate(ENTREZID = as.character(ENTREZID))  %>%
+    mutate(ENTREZID = case_when(
+        Kinase == "ADCK3" ~ '56997',
+        Kinase == "ADRBK1" ~ '156',
+        Kinase == "IARS" ~ '3376',
+        Kinase == "CSNK2A1;CSNK2A3" ~ '283106',
+        Kinase == "ZAK" ~ '51776',
+        Kinase == "GARS" ~ '2617',
+        Kinase == "DDX3X;DDX3Y" ~ '1654',
+        Kinase == "PRKX;PRKY" ~ '5613',
+        Kinase == "SKIV2L2" ~ '23517',
+        Kinase == "NME2;NME2P1" ~ '283458',
+        Kinase == "SLC25A6;SLC25A4" ~ '293',
+        Kinase == "RAB6A;RAB6B" ~ '5870',
+        Kinase == "GSPT1;GSPT2" ~ '2935',
+        Kinase == "PDPK1;PDPK2P" ~ '653650',
+        Kinase == "PRKCE;PRKCH" ~ 'PRKCE;PRKCH',
+        Kinase == "PIP4K2A;PIP4K2B" ~ 'PIP4K2A;PIP4K2B',
+        Kinase == "CARS" ~ '833',
+        Kinase == "U2AF1;U2AF1L4" ~ '7307',
+        Kinase == "CDC2L2" ~ '728642',
+        Kinase == "IKKA" ~ '1147',
+        Kinase == "IKKB" ~ '3551',
+        Kinase == "PKNB(M.tuberculosis)" ~ '887072',
+        Kinase == "KPCD1" ~ '5587',
+        Kinase == "VGFR1" ~ '2321',
+        Kinase == "PGFRA" ~ '5156',
+        Kinase == "VGFR2" ~ '3791',
+        Kinase == "ADCK4" ~ '79934',
+        Kinase == "NUAK1" ~ '9891',
+        Kinase == "NIM1" ~ '167359',
+        Kinase == "MK13" ~ '5603',
+        Kinase == "MK12" ~ '6300',
+        Kinase == "PAK7" ~ '57144',
+        Kinase == "KGP2" ~ '5593',
+        Kinase == "SgK110" ~ '100130827',
+        Kinase == "SIK1" ~ '150094',
+        Kinase == "TSSK1" ~ '83942',
+        Kinase == "KKCC1" ~ '84254',
+        Kinase == "CHK2" ~ '11200',
+        Kinase == "DCLK1" ~ '9201',
+        Kinase == "PFCDPK1(P.falciparum)" ~ '812762',
+        Kinase == "MP2K7" ~ '5609',
+        Kinase == "MST4" ~ '51765',
+        Kinase == "CDK15" ~ '65061',
+        Kinase == "CDK14" ~ '5218',
+        Kinase == "KPCE" ~ '5581',
+        Kinase == "KPCL" ~ '5583',
+        Kinase == "M3K12" ~ '7786',
+        Kinase == "M3K13" ~ '9175',
+        Kinase == "PFPK5(P.falciparum)" ~ '813841',
+        Kinase == "GRK2" ~ '156',
+        Kinase == "GRK3" ~ '157',
+        Kinase == "HASPIN" ~ '83930',
+        Kinase == "QSK" ~ '23387',
+        Kinase == "ICK" ~ '22858',
+        Kinase == "MLTK" ~ '51776',
+        Kinase == "Q6ZSR9" ~ 'Q6ZSR9',
+        TRUE ~ ENTREZID
+    ))  %>% 
+    select(Kinase, ENTREZID)
+
+full_kinase_info = bind_rows(kinase_info  %>% mutate(ENTREZID = as.character(ENTREZID))  %>% drop_na(), na_entrez)  %>% 
+    distinct()
+
+#check if there are any kinases that have multiple entrez ids
+duplicate_kinases = full_kinase_info  %>% 
+    group_by(Kinase)  %>% 
+    summarize(n = n())  %>% 
+    filter(n > 1)
+
+full_kinase_info_no_duplicates = full_kinase_info  %>% 
+    filter(ENTREZID != "100124696")
+
+#check if there are any kinases that have multiple symbols for the same etrez id
+duplicate_kinases = full_kinase_info  %>% 
+    group_by(ENTREZID)  %>% 
+    summarize(n = n())  %>% 
+    filter(n > 1)
+
+kinase_info_final <- full_kinase_info_no_duplicates %>%
+  mutate(ENTREZID = as.numeric(ENTREZID))  %>% 
+  group_by(ENTREZID) %>%
+  mutate(standard_name = ifelse(row_number() == 1 & !grepl("\\(|-", Kinase), Kinase, NA_character_)) %>%
+  fill(standard_name, .direction = "downup") %>%
+  mutate(standard_name = ifelse(grepl("\\(|-", Kinase), Kinase, standard_name))  %>% 
+  mutate(standard_name = replace_na(standard_name, first(standard_name[!is.na(standard_name)])))  %>% 
+  ungroup()  %>% 
+  rename(original_kinase_name = Kinase, target = standard_name)  %>% 
+  mutate(target = if_else(is.na(ENTREZID), original_kinase_name, target))  %>% 
+  write_csv(here("results/all_kinase_info.csv"))
+
+
+combined_dataset_kinase_compound_info = combined_dataset_compound_info  %>% 
+    select(-ENTREZID)  %>%
+    left_join(kinase_info_final, by = c("Kinase" = "original_kinase_name"))  %>%
+    select(original_kinase_name = Kinase,
+            target,
+            target_entrez_id = ENTREZID,
+            kd_apparent = Kd,
+            compound = Compound,
+            compound_pubchem_cid = cid,
+            compound_pubchem_name = pubchem_name,
+            compound_canonical_smiles = CanonicalSMILES,
+            dataset)  %>% 
+    write_fst(here("results/combined_kd_data_processed.fst")) 
+
+#Excluding the OKL data for now, since it is not yet published by the original authors and we don't have permission to share it.
+
+combined_dataset_summarized_no_okl = combined_dataset_kinase_compound_info  %>%
+    filter(dataset != "okl")  %>% 
+    group_by(target, target_entrez_id, compound_pubchem_name, compound_pubchem_cid, compound_canonical_smiles)  %>%
+    summarise(mean_kd_apparent = mean(kd_apparent, na.rm = T))  %>% 
+    ungroup()  %>% 
+    write_fst(here("results/combined_kd_data_summarized_no_okl.fst"))
+
+combined_dataset_summarized = combined_dataset_kinase_compound_info  %>%
+    group_by(target, target_entrez_id, compound_pubchem_name, compound_pubchem_cid, compound_canonical_smiles)  %>%
+    summarise(mean_kd_apparent = mean(kd_apparent, na.rm = T))  %>% 
+    ungroup()  %>% 
+    write_fst(here("results/combined_kd_data_summarized.fst"))
+
+```
+
+## Add non-kinase inhibior target data for 
+
+```{r}
+novartis_targets = read_csv(here("data/novartis_drug_target_kds.csv"))  %>% 
+    mutate(cid = if_else(novartis_name == "dacarbazine", 135398738, cid))
+
+novartis_entrez = bitr(novartis_targets$uniprot_id, fromType = "UNIPROT", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+novartis_symbol = bitr(novartis_targets$uniprot_id, fromType = "UNIPROT", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+novartis_cid_info = readable_synonyms <- map_chr(novartis_targets$cid  %>% unique(), get_readable_synonym)
+novartis_cid_info = data.frame(cid = novartis_targets$cid  %>% unique(), pubchem_name = readable_synonyms, stringsAsFactors = FALSE)  %>% 
+    filter(!is.na(cid))  %>%
+    filter(cid != 0)  %>% 
+    mutate(cid = as.character(cid))
+
+novartis_cid_smiles = pc_prop(novartis_targets$cid  %>% unique(), properties = c("CanonicalSMILES"))  %>% 
+    filter(!is.na(CID))  %>%
+    filter(CID != 0)  %>% 
+    mutate(cid = as.character(CID))
+
+novartis_targets_entrez = novartis_targets  %>%
+    mutate(cid = as.character(cid))  %>%
+    left_join(novartis_entrez, by = c("uniprot_id" = "UNIPROT"))  %>% 
+    left_join(novartis_symbol, by = c("uniprot_id" = "UNIPROT"))  %>%
+    left_join(novartis_cid_info, by = c("cid"))  %>%
+    left_join(novartis_cid_smiles, by = c("cid"))  %>%
+    mutate(pubchem_name = if_else(is.na(pubchem_name), novartis_name, pubchem_name))  %>%
+    select(target = SYMBOL, target_entrez_id = ENTREZID, compound_pubchem_cid = cid, compound_pubchem_name = pubchem_name, compound_canonical_smiles = CanonicalSMILES, mean_kd_apparent = kd)
+
+# combine with the rest of the data
+combined_dataset_summarized_no_okl = read_fst(here("results/combined_kd_data_summarized_no_okl.fst"))  %>% 
+    mutate(target_entrez_id = as.character(target_entrez_id))  %>%
+    bind_rows(novartis_targets_entrez)  %>% 
+    write_fst(here("results/combined_novartis_kd_data_summarized_no_okl.fst"))
+
+```
+
+## EDA
+
+```{r}
+#the number of unique kinases
+combined_dataset_kinase_compound_info  %>% 
+    select(target)  %>% 
+    distinct()  %>% 
+    nrow()
+
+#the number of unique compounds
+combined_dataset_kinase_compound_info  %>% 
+    select(compound_pubchem_cid)  %>% 
+    distinct()  %>% 
+    nrow()
+
+```

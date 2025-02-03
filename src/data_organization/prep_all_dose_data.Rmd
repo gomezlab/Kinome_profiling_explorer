@@ -1,0 +1,579 @@
+```{r}
+library(tidyverse)
+library(here)
+library(fst)
+library(webchem)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(dplyr)
+library(conflicted)
+library(fst)
+library(ChemmineR)
+library(VennDiagram)
+library(wesanderson)
+library(ggupset)
+conflicts_prefer(select::dplyr)
+conflicts_prefer(clusterProfiler::select)
+conflicts_prefer(clusterProfiler::rename)
+conflicts_prefer(clusterProfiler::filter)
+conflicts_prefer(base::setdiff)
+conflicts_prefer(tibble::view)
+conflicts_prefer(dplyr::first)
+```
+
+# Prep kuster dose data
+
+## Read in all 2-dose files and combine into one dataframe
+
+Data was downloaded from the MASSIVE repository using the FTP client Filezilla at ftp://massive.ucsd.edu/v05/MSV000092248/ 
+```{r}
+
+all_files_path = here("data/new_kuster_data/per_dose_files")
+
+all_files = list.files(all_files_path, full.names = TRUE)
+
+all_data = data.frame()
+
+for (i in 1:length(all_files)){
+  
+  this_file = all_files[i]
+
+  this_drug_name = str_replace(basename(this_file), "_final\\.csv$", "")
+
+  # Use tryCatch to handle errors
+  this_file_data = tryCatch({
+    # Attempt to read and process the file
+    read_csv(this_file)  %>% 
+      mutate(drug = this_drug_name)  %>% 
+      select(drug, gene = Gene.names, starts_with("Median.Normalized.LFQ.intensity")) %>%
+      pivot_longer(starts_with("Median.Normalized.LFQ.intensity"), names_to = "dose", values_to = "intensity") %>%
+      mutate(dose = gsub("Median.Normalized.LFQ.intensity.", "", dose))
+  }, error = function(e) {
+    # Handle errors by returning a custom message or action
+    message("Data not appropriate type for file: ", this_file)
+    return(NULL) # Return NULL or an appropriate value to avoid halting execution
+  })
+
+  if (!is.null(this_file_data)) {
+    all_data = bind_rows(all_data, this_file_data)
+  }
+}
+```
+
+## Read all full-dose files and combine into one dataframe
+
+```{r}
+full_dose_files = all_files %>% 
+  as.data.frame()  %>% 
+  rename(file = 1)  %>%
+  filter(str_detect(file, "fulldose"))
+
+full_dose_data = data.frame()
+
+for (i in 1:nrow(full_dose_files)){
+  
+  this_file = full_dose_files$file[i]
+
+  this_drug_name = str_replace(basename(this_file), "_fulldose_final\\.csv$", "")
+
+  this_file_data = read_csv(this_file)  %>%  
+      select(drug = Drug,
+                gene = Name,
+                21:28) %>%
+      pivot_longer(-c("drug", "gene"), names_to = "dose", values_to = "intensity") %>%
+      mutate(dose = as.numeric(dose)*10^(-9))
+
+    full_dose_data = bind_rows(full_dose_data, this_file_data)
+  }
+```
+
+## Standardize and prep data
+
+```{r}
+
+drugs = all_data %>% 
+  select(drug) %>% 
+  distinct()
+
+doses = all_data %>% 
+  select(dose) %>% 
+  distinct()  %>% 
+  arrange(dose)
+
+data_processed = all_data  %>% 
+    filter(dose != "DMSO")  %>% 
+    mutate(dose = as.numeric(gsub("nM", "", dose))*10^-9)  %>%
+    bind_rows(full_dose_data)  %>%
+    filter(intensity < 3)  %>% 
+    group_by(drug, gene, dose)  %>%
+    summarize(relative_intensity = mean(intensity, na.rm = TRUE))  %>% 
+    ungroup()  %>% 
+    drop_na()
+
+#distribution of doses
+data_processed  %>% 
+    ggplot(aes(x = dose)) +
+    geom_histogram() +
+    theme_minimal()
+
+#distribution of relative intensities
+data_processed  %>% 
+    ggplot(aes(x = relative_intensity)) +
+    geom_histogram() +
+    theme_minimal()
+
+processed_doses = data_processed %>%
+  select(dose) %>% 
+  distinct()  %>% 
+  arrange(dose)
+
+number_kinases = data_processed  %>% 
+  select(gene) %>% 
+  distinct()  %>% 
+  nrow()
+
+write.fst(data_processed, here("results/processed_kuster_dose_data.fst"))
+```
+
+# Combine with LINCS, klaeger, and okl data
+
+```{r}
+LINCS_data = read_csv(here("data/LINCS_data/full_LINCS_UNC_1uM_data_imputed.csv"))
+
+LINCS_data_processed = LINCS_data  %>% 
+    pivot_longer(-c("Small.Molecule.Name", "Dose"), names_to = "gene", values_to = "percent_control")  %>% 
+    select(drug = Small.Molecule.Name,
+            dose = Dose,
+            gene,
+            relative_intensity = percent_control)  %>%
+    mutate(dose = dose*10^-6, 
+           relative_intensity = relative_intensity/100) 
+
+klaeger_data = read_rds(here("data/klaeger_data/klaeger_full_tidy.rds"))  %>% 
+    select(drug, gene = gene_name, dose = concentration_M, relative_intensity)
+
+okl_data = read_rds(here("results/okl_profiling_data.rds.gz"))  %>% 
+    select(drug, gene = discoverx_gene_symbol, entrez_gene_symbol, dose = concentration_nM, relative_intensity = percent_control)
+  
+okl_data_processed = okl_data  %>% 
+    mutate(dose = dose*10^-9, 
+           relative_intensity = relative_intensity/100)
+
+```
+
+# Prep combined data
+
+## Combine drug info
+```{r}
+
+LINCS_cids = read_csv(here("data/matching/all_LINCS_cids.csv"))  %>% 
+  mutate(cid = as.character(cid))  %>% 
+  select(Compound = LINCS_name, cid)
+
+klaeger_compound_info = read_csv(here("data/klaeger_data/klaeger_compound_info.csv"))  %>% 
+    select(Compound = Drug, SMILES = `SMILES code`, cid = PubChemCID)  %>% 
+    mutate(cid = as.character(cid))
+
+kuster_compound_info_tool = read_csv(here("data/new_kuster_data/compound_info.csv"))
+kuster_compound_info_clinical = read_csv(here("data/new_kuster_data/compound_info_clinical.csv"))
+kuster_compound_info = bind_rows(kuster_compound_info_tool, kuster_compound_info_clinical  %>% rename(Compound = Drug))  %>% 
+    select(Compound, SMILES)
+kuster_compound_cid = get_cid(unique(kuster_compound_info$SMILES), from = "smiles", domain = "compound", match = "all", verbose = T)
+kuster_compound_info = kuster_compound_info  %>% 
+    left_join(kuster_compound_cid, by = c("SMILES" = "query"))  %>% 
+    select(Compound, SMILES, cid)
+
+okl_compound_info = read_fst(here("data/okl_profiling_data/lsp_compound_dictionary.fst"))  %>% 
+    select(Compound = pref_name, inchi)  %>% 
+    distinct()  %>%
+    filter(Compound %in% okl_data$drug)  %>%
+    drop_na()
+okl_cid = pubchemInchi2cid(okl_compound_info$inchi  %>% unique())
+okl_compound_info = okl_compound_info  %>% 
+    select(Compound, inchi)  %>%
+    unique()  %>% 
+    bind_cols(cid = okl_cid)  %>% 
+    mutate(cid = as.character(cid))
+okl_0_cid = okl_compound_info  %>% 
+    filter(is.na(cid) | cid == 0)  %>% 
+    select(Compound)  %>% 
+    distinct()
+okl_0_cid = get_cid(okl_0_cid$Compound, from = "name", domain = "compound", match = "all", verbose = T)
+okl_compound_info = okl_compound_info  %>% 
+    left_join(okl_0_cid  %>% rename(cid_name = cid), by = c("Compound" = "query"))  %>% 
+    mutate(cid = if_else(is.na(cid) | cid == 0, cid_name, cid))  %>%
+    select(Compound, inchi, cid)
+
+all_compound_info = bind_rows(kuster_compound_info, klaeger_compound_info, okl_compound_info, LINCS_cids)  %>% 
+  select(drug = Compound, cid, SMILES, inchi)  %>% 
+  distinct()
+```
+
+## Combine data
+```{r}
+kuster_dose_data = read_fst(here("results/processed_kuster_dose_data.fst"))
+
+combined_data = bind_rows(kuster_dose_data  %>% mutate(dataset = "kuster"),
+                          LINCS_data_processed  %>% mutate(dataset = "LINCS"),
+                          klaeger_data  %>% mutate(dataset = "klaeger"),
+                          okl_data_processed  %>% mutate(dataset = "okl"))
+
+combined_compound_info = combined_data  %>% 
+    select(drug, dataset)  %>% 
+    distinct()  %>% 
+    left_join(all_compound_info, by = "drug", relationship = "many-to-many")  %>% 
+    distinct()  %>% 
+    mutate(cid = if_else(str_detect(drug, "Lestaurtinib"), "126565", cid))  %>% 
+    filter(!is.na(cid) | !is.na(SMILES) | !is.na(inchi))  %>% 
+    select(-inchi)
+
+combined_dataset_compound_info = combined_data  %>%
+    left_join(combined_compound_info, by = "drug", relationship = "many-to-many")  %>%
+    distinct()  %>%
+    mutate(cid = if_else(is.na(cid) | cid == 0, drug, cid))
+
+kinase_info = read_csv(here("results/all_kinase_info.csv"))  %>% 
+    mutate(ENTREZID = as.character(ENTREZID))
+
+combined_kinase_info = combined_dataset_compound_info  %>%
+    select(gene)  %>% 
+    distinct() %>%  
+    left_join(kinase_info, by = c("gene" = "original_kinase_name"))
+
+na_target = combined_kinase_info  %>% 
+    filter(is.na(target))  %>% 
+    select(gene)  %>% 
+    distinct()
+
+na_target_entrez = bitr(na_entrez$gene, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+combined_kinase_info = combined_kinase_info  %>% 
+    drop_na()  %>%
+    bind_rows(na_target_entrez  %>%
+                  rename(gene = SYMBOL)  %>%  
+                  mutate(target = gene))
+
+combined_dataset_compound_kinase_info = combined_dataset_compound_info  %>%
+    left_join(combined_kinase_info, by = "gene")
+
+kinase_frequency = combined_dataset_compound_kinase_info  %>% 
+    count(target)  %>% 
+    filter(n > 100)
+
+combined_dataset_final = combined_dataset_compound_kinase_info  %>% 
+    filter(target %in% kinase_frequency$target)  %>% 
+    filter(!is.na(target))  %>%
+    distinct()  %>%  
+    select(compound = drug,
+            compound_dose_M = dose,
+            compound_pubchem_cid = cid,
+            compound_smiles = SMILES,
+            dataset = dataset.x,
+            original_target_name = gene,
+            target,
+            target_entrez_id = ENTREZID,
+            relative_intensity)
+
+write.fst(combined_dataset_final, here("results/combined_dose_data.fst"))
+
+```
+
+## EDA
+```{r}
+combined_dataset = read_fst(here("results/combined_dose_data.fst"))
+
+#number kinases
+combined_dataset  %>% 
+    select(target) %>% 
+    distinct()  %>% 
+    nrow()
+
+#number compounds
+combined_dataset  %>% 
+    select(compound_pubchem_cid)  %>% 
+    distinct()  %>% 
+    nrow()
+
+#doses of compounds
+doses = combined_dataset  %>%
+    mutate(compound_dose_M  = as.numeric(as.character(compound_dose_M)))  %>% 
+	mutate(compound_dose_uM = compound_dose_M * 10^6)  %>%
+	select(-compound_dose_M)  %>%
+    filter(compound_dose_uM != 0)  %>% 
+    count(compound_dose_uM)
+
+#distribution of mean relative intensities
+combined_dataset  %>% 
+    ggplot(aes(x = relative_intensity)) +
+    geom_histogram() +
+    theme_minimal()
+
+```
+
+## Make Venn Diagram for compounds in each dataset
+```{r}
+combined_dataset = read_fst(here("results/combined_dose_data.fst"))
+
+dataset_for_plot = combined_dataset  %>% 
+    select(compound_pubhcem_cid, dataset)  %>% 
+    distinct()  %>% 
+    filter(compound_pubhcem_cid != 0)  %>% 
+    drop_na()
+
+# Split the dataset by the 'dataset' column to get unique compounds from each original dataset
+datasets_split <- split(dataset_for_plot, dataset_for_plot$dataset)
+
+# Get unique compounds for each dataset
+unique_compounds <- lapply(datasets_split, function(df) unique(df$compound_pubhcem_cid))
+
+# Prepare a named list for VennDiagram 
+list_for_venn <- setNames(unique_compounds, names(unique_compounds))
+
+#use wesanderson palette
+myCol <- wes_palette("Zissou1", 4)
+
+# Generate and plot the Venn diagram (for 4 datasets, a quad Venn diagram)
+venn.plot <- venn.diagram(
+  x = list_for_venn,
+  filename = here("figures/venn_diagram_dose_data.png"),
+  category.names = names(list_for_venn),
+  output = TRUE,
+    # Output features
+    imagetype="png" ,
+    height = 1480 , 
+    width = 1480 , 
+    resolution = 300,
+  #plot features
+  lwd = 2,
+  lty = "blank",
+  fill = myCol,
+  cex = .6,
+  fontface = "bold",
+  fontfamily = "sans"
+)
+```
+
+# Make UpSet plot for compounds in each dataset
+```{r}
+upset_data = combined_dataset  %>% 
+    select(compound_pubhcem_cid, dataset)  %>% 
+    distinct()  %>% 
+    filter(compound_pubhcem_cid != 0)  %>% 
+    group_by(compound_pubhcem_cid)  %>%
+    summarise(dataset = list(dataset))  %>%
+    drop_na()
+
+# Create the UpSet plot
+ggplot(upset_data) +
+  geom_bar(aes(x = dataset)) +
+  scale_x_upset(n_intersections = 10) +
+  theme_minimal()
+
+```
+
+# Make UpSet plot for targets in each dataset
+```{r}
+upset_data = combined_dataset  %>% 
+    select(target, dataset)  %>% 
+    distinct()  %>% 
+    filter(!is.na(target))  %>% 
+    group_by(target)  %>%
+    summarise(dataset = list(dataset))  %>%
+    drop_na()
+
+# Create the UpSet plot
+ggplot(upset_data) +
+  geom_bar(aes(x = dataset)) +
+  scale_x_upset(n_intersections = 10) +
+  theme_minimal()
+
+```
+
+# Writing out summarized dataset
+
+Excluding the OKL data for now, since it is not yet published by the original authors and we don't have permission to share it.
+
+```{r}
+combined_dataset = read_fst(here("results/combined_dose_data.fst"))
+
+all_compounds = combined_dataset  %>% 
+    select(compound, compound_pubchem_cid)  %>% 
+    distinct()  %>% 
+    mutate(compound_pubchem_cid = as.numeric(compound_pubchem_cid))  %>% 
+    drop_na()
+  
+unique_cids <- unique(all_compounds$compound_pubchem_cid)
+
+# Updated function with error handling
+get_readable_synonym <- function(cid) {
+
+synonyms = pc_synonyms(cid, from = "cid", verbose = TRUE)
+
+first_synonym = synonyms %>% 
+    pluck(1)  %>% 
+    pluck(1)
+
+return(as.character(first_synonym))
+
+}
+
+# Use map_chr to apply the function and ensure character output
+readable_synonyms <- map_chr(unique_cids, get_readable_synonym)
+
+# Create the data frame
+readable_synonyms_df <- data.frame(cid = unique_cids, pubchem_name = readable_synonyms, stringsAsFactors = FALSE)
+
+write_csv(readable_synonyms_df, here("results/combined_dose_compound_synonyms.csv"))
+readable_synonyms_df = read_csv(here("results/combined_dose_compound_synonyms.csv"))  %>% 
+    filter(!is.na(cid))  %>%
+    filter(cid != 0)  %>% 
+    mutate(cid = as.character(cid))
+
+compound_cid_info_smiles = pc_prop(all_compounds$compound_pubchem_cid  %>% unique(), properties = c("CanonicalSMILES"))  %>% 
+    mutate(CID = as.character(CID))
+
+combined_dataset_compound_info = combined_dataset  %>%
+    mutate(compound_pubchem_cid = as.character(compound_pubchem_cid))  %>%
+    left_join(readable_synonyms_df, by = c("compound_pubchem_cid" = "cid"))  %>%
+    rename(compound_pubchem_name = pubchem_name)  %>%
+    left_join(compound_cid_info_smiles, by = c("compound_pubchem_cid" = "CID"))  %>%
+    mutate(compound_pubchem_name = case_when(
+        is.na(compound_pubchem_name) ~ compound,
+        TRUE ~ compound_pubchem_name
+    ),
+    compound_smiles = case_when(
+        is.na(compound_smiles) ~ CanonicalSMILES,
+        TRUE ~ compound_smiles
+    ))  %>% 
+    select(-CanonicalSMILES)
+
+combined_dataset_summarized_no_okl = combined_dataset_compound_info  %>% 
+    filter(dataset != "okl")  %>%
+    mutate(compound_dose_M  = as.numeric(as.character(compound_dose_M)))  %>% 
+	mutate(compound_dose_uM = compound_dose_M * 10^6)  %>%
+	select(-compound_dose_M)  %>%
+    filter(compound_dose_uM != 0)  %>%
+    #impute >1 values as 1
+    mutate(relative_intensity = if_else(relative_intensity > 1, 1, relative_intensity))  %>%
+    group_by(compound_pubchem_name, compound_pubchem_cid, compound_smiles, compound_dose_uM, target, target_entrez_id)  %>%
+    summarise(mean_relative_intensity = mean(relative_intensity, na.rm = T))  %>% 
+    ungroup()  %>%
+    mutate(percent_inhibition = 1 - mean_relative_intensity)  %>%
+    select(-mean_relative_intensity)  %>%
+    write_fst(here("results/combined_dose_data_summarized_no_okl.fst"))
+
+#write out csv for app
+data_for_app = combined_dataset_summarized_no_okl  %>%
+    group_by(compound_pubchem_name, compound_dose_uM, target, target_entrez_id)  %>%
+    summarise(percent_inhibition = mean(percent_inhibition, na.rm = T))  %>%
+    ungroup()  %>%
+    write_csv(here("results/combined_dose_data_for_app.csv"))
+
+combined_dataset_summarized = combined_dataset_compound_info  %>% 
+    mutate(compound_dose_M  = as.numeric(as.character(compound_dose_M)))  %>% 
+	mutate(compound_dose_uM = compound_dose_M * 10^6)  %>%
+	select(-compound_dose_M)  %>%
+    filter(compound_dose_uM != 0)  %>%
+    #impute >1 values as 1
+    mutate(relative_intensity = if_else(relative_intensity > 1, 1, relative_intensity))  %>%
+    group_by(compound_pubchem_name, compound_pubchem_cid, compound_smiles, compound_dose_uM, target, target_entrez_id)  %>%
+    summarise(mean_relative_intensity = mean(relative_intensity, na.rm = T))  %>% 
+    ungroup()  %>%
+    mutate(percent_inhibition = 1 - mean_relative_intensity)  %>%
+    select(-mean_relative_intensity)  %>%
+    write_fst(here("results/combined_dose_data_summarized.fst"))
+
+paclitaxel = combined_dataset_summarized  %>% 
+    filter(compound_pubchem_cid =="36314")
+```
+
+## Add non-kinase inhibior target data for novartis
+
+```{r}
+novartis_targets = read_csv(here("data/novartis_drug_target_kds.csv"))  %>% 
+    mutate(cid = if_else(novartis_name == "dacarbazine", 135398738, cid))
+
+novartis_entrez = bitr(novartis_targets$uniprot_id, fromType = "UNIPROT", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+novartis_symbol = bitr(novartis_targets$uniprot_id, fromType = "UNIPROT", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+novartis_cid_info = readable_synonyms <- map_chr(novartis_targets$cid  %>% unique(), get_readable_synonym)
+novartis_cid_info = data.frame(cid = novartis_targets$cid  %>% unique(), pubchem_name = readable_synonyms, stringsAsFactors = FALSE)  %>% 
+    filter(!is.na(cid))  %>%
+    filter(cid != 0)  %>% 
+    mutate(cid = as.character(cid))
+
+novartis_targets_entrez = novartis_targets  %>%
+    mutate(cid = as.character(cid))  %>%
+    left_join(novartis_entrez, by = c("uniprot_id" = "UNIPROT"))  %>% 
+    left_join(novartis_symbol, by = c("uniprot_id" = "UNIPROT"))  %>%
+    left_join(novartis_cid_info, by = c("cid"))  %>%
+    mutate(pubchem_name = if_else(is.na(pubchem_name), novartis_name, pubchem_name))  %>%
+    mutate(cid = if_else(is.na(cid), novartis_name, cid))  %>%
+    select(target = SYMBOL, target_entrez_id = ENTREZID, compound_pubchem_cid = cid, compound_pubchem_name = pubchem_name, compound_smiles = CanonicalSMILES, mean_kd_apparent = kd)  %>% 
+    #convert kd to "fraction bound" at 1 uM (1000 nM because Kds are in nM)
+    mutate(percent_inhibition = (1000 / (1000 + mean_kd_apparent)), compound_dose_uM = 1)  %>% 
+    select(-mean_kd_apparent)
+
+# combine with the rest of the data
+combined_dataset_summarized = read_fst(here("results/combined_dose_data_summarized.fst"))  %>% 
+    mutate(target_entrez_id = as.character(target_entrez_id))  %>%
+    bind_rows(novartis_targets_entrez)  %>% 
+    write_fst(here("results/combined_novartis_dose_data_summarized.fst"))
+
+combined_dataset_summarized_no_okl = read_fst(here("results/combined_dose_data_summarized_no_okl.fst"))  %>% 
+    mutate(target_entrez_id = as.character(target_entrez_id))  %>%
+    bind_rows(novartis_targets_entrez)  %>% 
+    write_fst(here("results/combined_novartis_dose_data_summarized_no_okl.fst"))  %>% 
+    write_csv(here("results/combined_novartis_dose_data_summarized_no_okl.csv"))
+
+test_for_duplicates = combined_dataset_summarized_no_okl  %>% 
+    count(compound_pubchem_cid, target, compound_dose_uM)
+
+palbociclib = combined_dataset_summarized  %>% 
+    filter(compound_pubchem_cid == "5330286")
+```
+
+# Getting kinase diversity lists for CORAL
+
+```{r}
+combined_dataset = read_fst(here("results/combined_dose_data_summarized_no_okl.fst"))
+
+KCGS_kinases = combined_dataset  %>%
+    filter(dataset == "LINCS")  %>%
+    filter(relative_intensity < 0.01)  %>%
+    select(target_entrez_id)  %>% 
+    distinct()  %>% 
+    mutate(group = "Hit_>_80%")
+
+All_kinases = combined_dataset  %>%
+    filter(relative_intensity < 0.2)  %>%
+    select(target_entrez_id)  %>% 
+    distinct()  %>% 
+    mutate(group = "Hit_>_80%")
+
+library(clipr)
+
+KCGS_kinases  %>% 
+    write_clip()
+
+All_kinases  %>%
+    write_clip()
+
+#number kinases
+combined_dataset  %>% 
+    select(target_entrez_id)  %>% 
+    distinct()  %>% 
+    nrow()
+
+#number compounds
+combined_dataset  %>% 
+    select(compound_pubchem_cid)  %>% 
+    distinct()  %>% 
+    nrow()
+
+#doses of compounds
+combined_dataset  %>% 
+    select(compound_pubchem_cid, compound_dose_uM)  %>% 
+    distinct()  %>% 
+    arrange(compound_dose_uM)
+
+```
