@@ -1,89 +1,126 @@
-```{r}
+```{r setup}
 library(shiny)
 library(here)
-library(dplyr)
+library(data.table)
 library(fst)
-library(tidyHeatmap)
 library(ggplot2)
 ```
 
-```{r}
+```{r load-data}
 data_path <- here("results/combined_kd_data_summarized.fst")
-combined_dataset_kinase_compound_info <- read_fst(data_path)  %>% 
-    rename(kd_apparent = mean_kd_apparent, compound = compound_pubchem_cid)
+dt <- as.data.table(read_fst(data_path))[
+  , .(target, compound = compound_pubchem_cid, kd_apparent = mean_kd_apparent)
+]
+```
 
-
-# UI
+```{r ui}
 ui <- fluidPage(
   titlePanel("Kinase Drug Interactions Visualization"),
   tabsetPanel(
-    tabPanel("Drug to Target", 
-             sidebarLayout(
-               sidebarPanel(
-                 selectInput("selectedDrug", "Choose a Drug:",
-                             choices = unique(combined_dataset_kinase_compound_info$compound)),
-                 numericInput("kdThresholdDrug", "Kd Threshold (nM):", 1000)
-               ),
-               mainPanel(
-                 plotOutput("barGraphDrug")
-               )
-             )),
+    tabPanel("Drug to Target",
+      sidebarLayout(
+        sidebarPanel(
+          selectizeInput(
+            "selectedDrug", "Choose a Drug:",
+            choices = NULL,
+            options = list(placeholder = "Type to search…")
+          ),
+          numericInput("kdThresholdDrug", "Kd Threshold (nM):", 1000)
+        ),
+        mainPanel(
+          plotOutput("barGraphDrug")
+        )
+      )
+    ),
     tabPanel("Target to Drug",
-             sidebarLayout(
-               sidebarPanel(
-                 selectInput("selectedTarget", "Choose a Target:",
-                             choices = unique(combined_dataset_kinase_compound_info$target)),
-                 numericInput("kdThresholdTarget", "Kd Threshold (nM):", 1000)
-               ),
-               mainPanel(
-                 plotOutput("barGraphTarget")
-               )
-             ))
+      sidebarLayout(
+        sidebarPanel(
+          selectizeInput(
+            "selectedTarget", "Choose a Target:",
+            choices = NULL,
+            options = list(placeholder = "Type to search…")
+          ),
+          numericInput("kdThresholdTarget", "Kd Threshold (nM):", 1000)
+        ),
+        mainPanel(
+          plotOutput("barGraphTarget")
+        )
+      )
+    )
   )
 )
+```
 
-# Server logic
-server <- function(input, output) {
-  # Bar graph for Drug to Target
+```{r server}
+server <- function(input, output, session) {
+  # Populate selectize inputs server-side for better performance
+  updateSelectizeInput(
+    session, "selectedDrug",
+    choices = unique(dt$compound),
+    server = TRUE
+  )
+  updateSelectizeInput(
+    session, "selectedTarget",
+    choices = unique(dt$target),
+    server = TRUE
+  )
+
+  # Reactive filtered data based on inputs
+  filteredDrug <- reactive({
+    req(input$selectedDrug)
+    dt[
+      compound == input$selectedDrug & kd_apparent < input$kdThresholdDrug
+    ][order(-kd_apparent)]
+  })
+
+  filteredTarget <- reactive({
+    req(input$selectedTarget)
+    dt[
+      target == input$selectedTarget & kd_apparent < input$kdThresholdTarget
+    ][order(-kd_apparent)]
+  })
+
+  # Drug -> Target bar plot with caching
   output$barGraphDrug <- renderPlot({
-    filtered_data <- combined_dataset_kinase_compound_info %>%
-      filter(compound == input$selectedDrug, kd_apparent < input$kdThresholdDrug) %>%
-      arrange(desc(kd_apparent)) %>%
-      mutate(target = factor(target, levels = unique(target))) # Ensure correct ordering
-    
-    if(nrow(filtered_data) > 0) {
-      ggplot(filtered_data, aes(x = target, y = kd_apparent)) +
-        geom_col() +
-        coord_flip() + # Make the bar graph horizontal
-        theme_minimal() +
-        labs(x = "Target", y = "Kd (nM)", title = paste("Kd values for", input$selectedDrug)) +
-        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    data <- filteredDrug()
+    if (nrow(data) == 0) {
+      plot.new()
+      text(0.5, 0.5, "No data available for the selected criteria.")
     } else {
-      print("No data available for the selected criteria.")
+      data[, target := factor(target, levels = unique(target))]
+      ggplot(data, aes(x = target, y = kd_apparent)) +
+        geom_col() +
+        coord_flip() +
+        theme_minimal() +
+        labs(
+          x = "Target", y = "Kd (nM)",
+          title = paste("Kd values for", input$selectedDrug)
+        ) +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
     }
-  })
-  
-  # Bar graph for Target to Drug
+  }) %>% bindCache(input$selectedDrug, input$kdThresholdDrug)
+
+  # Target -> Drug bar plot with caching
   output$barGraphTarget <- renderPlot({
-    filtered_data <- combined_dataset_kinase_compound_info %>%
-      filter(target == input$selectedTarget, kd_apparent < input$kdThresholdTarget) %>%
-      arrange(desc(kd_apparent)) %>%
-      mutate(compound = factor(compound, levels = unique(compound))) # Ensure correct ordering
-    
-    if(nrow(filtered_data) > 0) {
-      ggplot(filtered_data, aes(x = compound, y = kd_apparent)) +
-        geom_col() +
-        coord_flip() + # Make the bar graph horizontal
-        theme_minimal() +
-        labs(x = "Compound", y = "Kd (nM)", title = paste("Drugs targeting", input$selectedTarget)) +
-        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    data <- filteredTarget()
+    if (nrow(data) == 0) {
+      plot.new()
+      text(0.5, 0.5, "No data available for the selected criteria.")
     } else {
-      print("No data available for the selected criteria.")
+      data[, compound := factor(compound, levels = unique(compound))]
+      ggplot(data, aes(x = compound, y = kd_apparent)) +
+        geom_col() +
+        coord_flip() +
+        theme_minimal() +
+        labs(
+          x = "Compound", y = "Kd (nM)",
+          title = paste("Drugs targeting", input$selectedTarget)
+        ) +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
     }
-  })
+  }) %>% bindCache(input$selectedTarget, input$kdThresholdTarget)
 }
 
-# Run the app
+# Run the application
 shinyApp(ui = ui, server = server)
-
 ```
