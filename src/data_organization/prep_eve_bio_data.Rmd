@@ -1,0 +1,133 @@
+```{r setup, include=FALSE}
+library(tidyverse)
+library(here)
+library(webchem)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(dplyr)
+library(conflicted)
+library(fst)
+library(ChemmineR)
+library(VennDiagram)
+library(wesanderson)
+library(ggupset)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::slice)
+conflicts_prefer(clusterProfiler::select)
+conflicts_prefer(clusterProfiler::rename)
+conflicts_prefer(clusterProfiler::filter)
+conflicts_prefer(base::setdiff)
+conflicts_prefer(tibble::view)
+conflicts_prefer(dplyr::first)
+```
+
+```{r load_data}
+
+novartis_fake_kds = read_csv(here("data/novartis_drug_target_kds.csv"))
+
+eve_bio_compound_info = read_csv(here("data/evebio_data_release7/compound_table.csv"))
+
+eve_bio_target_info = read_csv(here("data/evebio_data_release7/target_table.csv"))
+
+eve_bio_detailed = read_csv(here("data/evebio_data_release7/detailed_result_table.csv"))
+
+combined_kinome_profiling = read_fst(here("results/combined_dose_data_summarized_LFQ_only.fst"))
+
+novartis_eve_bio_compound_ids = tribble(
+    ~novartis_compound_name, ~eve_bio_compound_id,
+    "gemcitabine", "EB000918",
+    "LDE225", "EB001273",
+    "tamoxifen", "EB000206",
+    "dacarbazine", "EB001077",
+    "everolimus", "EB000832",
+    "LKM257", "EVE00001899"
+    )
+
+```
+
+## Match Eve and Novartis Compounds
+```{r match_novartis_evebio_compounds}
+
+novartis_eve_map = novartis_fake_kds %>%
+    select(novartis_name, compound_pubchem_cid = cid) %>%
+    distinct() %>%
+    inner_join(novartis_eve_bio_compound_ids, by = c("novartis_name" = "novartis_compound_name"))
+
+predict_pi_at_uM <- function(pXC50, slope, bottom, top, conc_uM = 1) {
+  s <- ifelse(is.na(slope) | slope == 0, 1, slope)
+  b <- ifelse(is.na(bottom), 0, bottom)
+  t <- ifelse(is.na(top),   100, top)
+  logIC50 <- -pXC50
+  logC    <- log10(conc_uM)
+  resp <- b + (t - b) / (1 + 10^((logIC50 - logC) * s))
+  resp[is.na(pXC50)] <- NA_real_
+  pmin(pmax(resp, 0), 100)
+}
+
+# Deduplicate the mapping so each Eve Compound_ID joins once
+novartis_eve_map_unique <- novartis_eve_map %>%
+  arrange(novartis_name) %>%
+  distinct(eve_bio_compound_id, .keep_all = TRUE)
+
+# --- Filter only dose–response quantified data ---
+eve_filtered <- eve_bio_detailed %>%
+  inner_join(novartis_eve_map_unique, by = c("Compound_ID" = "eve_bio_compound_id")) %>%
+  filter(
+    Final_Category == "Active - Quantified (11pt)",
+    Mode != "Agonist",
+    Target_ID != "Viability",
+    !is.na(pXC50), !is.na(Slope), !is.na(Asymp_Max)
+  ) %>%
+  mutate(
+    percent_inhibition_1uM = predict_pi_at_uM(pXC50, Slope, Asymp_Min, Asymp_Max, conc_uM = 1)
+  )
+
+# --- Collapse per (compound × target) ---
+eve_real_affinity_all <- eve_filtered %>%
+  arrange(Compound_ID, Target_ID, desc(percent_inhibition_1uM)) %>%
+  group_by(Compound_ID, Target_ID) %>%
+  slice(1) %>%
+  ungroup() %>%
+  rename(target_symbol = Target_ID) %>%
+  select(
+    novartis_name,
+    compound_pubchem_cid,
+    target_symbol,
+    percent_inhibition_1uM,
+    pXC50, Slope, Asymp_Min, Asymp_Max
+  ) %>%
+  left_join(
+    eve_bio_target_info %>%
+      select(target_symbol = Target_ID, target_hgnc = Gene),
+    by = "target_symbol"
+  )
+
+sym_uni <- unique(eve_real_affinity_all$target_hgnc)
+map_tbl <- tibble(SYMBOL = sym_uni) %>%
+  left_join(
+    AnnotationDbi::select(org.Hs.eg.db, keys = sym_uni, keytype = "SYMBOL",
+                          columns = c("ENTREZID","UNIPROT")),
+    by = "SYMBOL"
+  ) %>%
+  group_by(SYMBOL) %>%
+  summarise(
+    target_entrez_id = dplyr::first(ENTREZID[!is.na(ENTREZID)]),
+    uniprot_id       = dplyr::first(UNIPROT[!is.na(UNIPROT)]),
+    .groups = "drop"
+  )
+
+eve_real_affinity_entrez <- eve_real_affinity_all %>%
+  left_join(map_tbl, by = c("target_hgnc" = "SYMBOL")) %>%
+  relocate(target_entrez_id, uniprot_id, .after = target_hgnc) %>%
+  rename(target = target_hgnc, compound_pubchem_name = novartis_name) %>%
+  select(-target_symbol, -uniprot_id) %>%
+  mutate(compound_pubchem_cid = as.character(compound_pubchem_cid)) %>%
+  select(compound_pubchem_name, compound_pubchem_cid, target, target_entrez_id,
+         percent_inhibition = percent_inhibition_1uM) %>%
+    mutate(compound_dose_uM = 1, percent_inhibition = percent_inhibition/100)
+
+kinome_novartis_combined = combined_kinome_profiling %>%
+    bind_rows(eve_real_affinity_entrez)
+
+write_fst(kinome_novartis_combined, here("results/kinome_profiling_novartis_evebio_combined.fst"))
+```      
