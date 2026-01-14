@@ -540,6 +540,79 @@ ht
 
 ```
 
+### Make Heatmap of all drugs at 1 uM (all kinases, missing imputed to 0)
+```{r}
+combined_dataset_summarized = read_fst(here("results/combined_dose_data_summarized_LFQ_only.fst"))
+
+heatmap_all_1uM = combined_dataset_summarized %>% 
+    mutate(
+        compound_dose_uM = as.numeric(as.character(compound_dose_uM)),
+        target_entrez_id = as.character(target_entrez_id)
+    ) %>% 
+    filter(!is.na(compound_dose_uM), compound_dose_uM == 1) %>% 
+    drop_na(compound_pubchem_cid, compound_pubchem_name, target_entrez_id)
+
+# summarise to one value per compound/target
+heatmap_all_1uM = heatmap_all_1uM %>% 
+    group_by(compound_pubchem_name, compound_pubchem_cid, target_entrez_id) %>% 
+    summarise(percent_inhibition = mean(percent_inhibition, na.rm = TRUE), .groups = "drop")
+
+# build full compound x target grid and impute missing percent_inhibition to 0 (faster than complete)
+compounds_1uM = heatmap_all_1uM %>% distinct(compound_pubchem_name, compound_pubchem_cid)
+targets_1uM = heatmap_all_1uM %>% distinct(target_entrez_id)
+
+heatmap_all_1uM_completed = tidyr::crossing(compounds_1uM, targets_1uM) %>%
+    left_join(heatmap_all_1uM, by = c("compound_pubchem_name", "compound_pubchem_cid", "target_entrez_id")) %>%
+    mutate(
+        percent_inhibition = coalesce(percent_inhibition, 0),
+        row_label = paste0(compound_pubchem_name, " (", compound_pubchem_cid, ")")
+    )
+
+# map entrez -> symbol for nicer columns
+entrez_to_symbol = heatmap_all_1uM_completed %>% 
+    distinct(target_entrez_id) %>% 
+    pull(target_entrez_id) %>% 
+    bitr(fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Hs.eg.db) %>%
+    rename(target_entrez_id = ENTREZID, target_symbol = SYMBOL)
+
+heatmap_all_1uM_labeled = heatmap_all_1uM_completed %>% 
+    left_join(entrez_to_symbol, by = "target_entrez_id") %>% 
+    mutate(target_symbol = if_else(is.na(target_symbol), target_entrez_id, target_symbol))
+
+ht_all = heatmap_all_1uM_labeled %>%
+    as_tibble() %>%
+    heatmap(
+    .row = row_label,
+    .column = target_symbol,
+    .value = percent_inhibition,
+    scale = "none",
+    cluster_rows = TRUE,
+    cluster_columns = TRUE,
+    palette_value = circlize::colorRamp2(
+        seq(0, 1, length.out = 9), 
+        RColorBrewer::brewer.pal(9, "YlGnBu")
+    ),
+    row_names_gp = gpar(fontsize = 10),
+    column_names_gp = gpar(fontsize = 6),
+    column_title = "Percent Inhibition at 1 uM (All Kinases, Missing=0)",
+    show_column_names = TRUE,
+    show_row_names = FALSE,
+    heatmap_legend_param = list(title = "Percent Inhibition", title_position = "topcenter", legend_direction = "horizontal")
+    )
+
+png("figures/heatmap_all_drugs_1uM_all_targets_LFQ_only.png", width = 7500, height = 7500, res = 300)
+draw(
+    ht_all %>% as_ComplexHeatmap(),
+    heatmap_legend_side = "bottom",
+    legend_grouping = "original",
+    padding = unit(c(10, 2, 2, 2), "mm")
+)
+dev.off()
+
+ht_all
+
+```
+
 
 # Writing out summarized dataset
 
@@ -643,6 +716,51 @@ combined_dataset_summarized = combined_dataset_compound_info  %>%
 
 paclitaxel = combined_dataset_summarized  %>% 
     filter(compound_pubchem_cid =="36314")
+```
+
+### Make Heatmap of trametinib (summarized data)
+```{r}
+combined_dataset_summarized = read_fst(here("results/combined_dose_data_summarized_LFQ_only.fst"))
+
+heatmap_data_summarized = combined_dataset_summarized  %>% 
+        filter(compound_pubchem_cid == "11707110")  %>% 
+        select(compound_dose_uM, target, percent_inhibition)  %>%
+        mutate(compound_dose_uM = as.numeric(as.character(compound_dose_uM)))  %>% 
+        filter(compound_dose_uM != 0)  %>% 
+        drop_na()
+
+ht_summarized = heatmap_data_summarized %>%
+        mutate(dose_label = paste0("dose_", compound_dose_uM, "uM")) %>%
+        as_tibble() %>%
+    heatmap(
+        .row = dose_label,
+        .column = target,
+        .value = percent_inhibition,
+        scale = "none",
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        palette_value = circlize::colorRamp2(
+            seq(0, 1, length.out = 9), 
+            RColorBrewer::brewer.pal(9, "YlGnBu")
+        ),
+        row_names_gp = gpar(fontsize = 10),
+        column_names_gp = gpar(fontsize = 4),
+        column_title = "Trametinib Percent Inhibition (Summarized)",
+        show_column_names = TRUE,
+        heatmap_legend_param = list(title = "Percent Inhibition", title_position = "topcenter", legend_direction = "horizontal")
+    ) 
+
+png("figures/heatmap_trametinib_summarized_LFQ_only.png", width = 5500, height = 1000, res = 300)
+draw(
+    ht_summarized %>% as_ComplexHeatmap(),
+    heatmap_legend_side = "bottom",
+    legend_grouping = "original",
+    padding = unit(c(10, 2, 2, 2), "mm")
+)
+dev.off()
+
+ht_summarized
+
 ```
 
 ## Add non-kinase inhibior target data for novartis
