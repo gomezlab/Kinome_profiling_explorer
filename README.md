@@ -1,5 +1,7 @@
 # Explorer for Kinome Profiling Data
 
+https://gomezlab.github.io/Kinome_profiling_explorer/
+
 An interactive dashboard for exploring large-scale kinome profiling datasets. This tool provides a unified view of compound-kinase interaction potencies and inhibition Kds across ~1750 compounds and ~500 kinases, totalling ~900,000 combinations.
 
 ## Data Overview
