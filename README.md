@@ -32,7 +32,7 @@ The data provided in this viewer was synthesized from three major kinome profili
 1.  **Kuster Processing**: Raw dose-response data files were parsed to extract normalized Label-Free Quantification (LFQ) intensities. Relative intensities (percent of control) were calculated by normalizing drug-treated intensities to the corresponding DMSO control values within each batch. Median values were calculated across replicates for the 1µM dose.
 2.  **Harmonization**: Relative binding intensities and apparent Kd values for LINCS and Klaeger were extracted from their respective published tidy datasets. All relative intensities were converted to a consistent 0-100 scale (% inhibition).
 3.  **Apparent Kd Calculation**: For dose-response data where Kd was not explicitly provided, binding curves were integrated or retrieved from source metadata to provide the `mean_kd_apparent` values shown in this dashboard.
-4.  **Integration**: Datasets were merged into a single master interaction table. Only kinases with coverage across multiple datasets (n > 100 measurements) were retained to ensure data robustness.
+4.  **Integration**: Datasets were merged into a single master interaction table. Only kinases with sufficient coverage across the full integrated data (n > 100 measurements) were retained to ensure robustness.
 
 ---
 *Created by Chinmaya Joisa for the Gomez Lab.*
