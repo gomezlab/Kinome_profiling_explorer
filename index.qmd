@@ -1,0 +1,533 @@
+---
+title: "Explorer for Kinome Profiling Data"
+author: "Chinmaya Joisa"
+date: "February 17, 2026"
+format:
+  html:
+    theme: cosmo
+    toc: false
+    embed-resources: true
+    page-layout: full
+editor: visual
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(fst)
+library(dplyr)
+library(jsonlite)
+library(base64enc)
+library(htmltools)
+library(here)
+```
+
+```{r load_libraries}
+# Ensure the libraries exist locally
+lib_dir <- here("lib")
+if(!dir.exists(lib_dir)) dir.create(lib_dir, recursive = TRUE)
+
+plotly_js <- file.path(lib_dir, "plotly.min.js")
+pako_js <- file.path(lib_dir, "pako.min.js")
+
+if(!file.exists(plotly_js)) {
+  download.file("https://cdn.plot.ly/plotly-2.27.0.min.js", plotly_js)
+}
+if(!file.exists(pako_js)) {
+  download.file("https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js", pako_js)
+}
+```
+
+```{r data_prep}
+data_path <- here("results/combined_dose_data_summarized_no_okl_LFQ_only_annotated_v2.fst")
+if(!file.exists(data_path)) stop("Data file not found at path: ", data_path)
+
+# 1. Aggregation and Filtering
+# Note: percent_inhibition is 0 to 1 scale in the source FST.
+all_1uM <- read_fst(data_path) %>%
+  filter(compound_dose_uM == 1)
+
+# Summary of hits > 10%
+dose_1uM_summary <- all_1uM %>%
+  filter(percent_inhibition > 0.1) %>% 
+  group_by(compound_pubchem_name, target) %>%
+  summarize(
+    median_inhibition = median(percent_inhibition, na.rm = TRUE) * 100,
+    mean_inhibition   = mean(percent_inhibition, na.rm = TRUE) * 100,
+    n_measurements    = n(),
+    compound_pubchem_cid = as.character(first(compound_pubchem_cid)),
+    target_entrez_id     = as.character(first(target_entrez_id)),
+    max_phase            = first(max_phase),
+    .groups = "drop"
+  )
+
+# Join Kd Data
+kd_path <- here("results/combined_kd_data_summarized_no_okl.fst")
+if(file.exists(kd_path)) {
+  kd_tbl <- read_fst(kd_path) %>%
+    mutate(target_entrez_id = as.character(target_entrez_id)) %>%
+    group_by(compound_pubchem_name, target) %>%
+    summarize(kd = mean(mean_kd_apparent, na.rm = TRUE), .groups = "drop")
+  
+  agg_tbl <- dose_1uM_summary %>%
+    left_join(kd_tbl, by = c("compound_pubchem_name", "target"))
+} else {
+  agg_tbl <- dose_1uM_summary %>% mutate(kd = NA_real_)
+}
+
+# Pre-calculate Compound Stats
+comp_stats <- agg_tbl %>%
+  group_by(compound_pubchem_name) %>%
+  summarize(
+    cid = first(compound_pubchem_cid),
+    max_phase = first(max_phase),
+    hits_80 = sum(median_inhibition > 80),
+    .groups = "drop"
+  )
+
+# Pre-calculate Kinase Stats
+total_compounds_in_lib <- length(unique(all_1uM$compound_pubchem_name))
+kin_stats <- agg_tbl %>%
+  group_by(target) %>%
+  summarize(
+    entrez = first(target_entrez_id),
+    hits_80 = sum(median_inhibition > 80),
+    selectivity_pct = (hits_80 / total_compounds_in_lib) * 100,
+    .groups = "drop"
+  )
+
+# 2. JSON Serialization & Compression
+json_data <- toJSON(agg_tbl, auto_unbox = TRUE)
+bin_data  <- memCompress(json_data, type = "gzip")
+b64_payload  <- base64encode(bin_data, linewidth = 1e8)
+
+# 3. Reference Lists/Objects
+compounds_list <- sort(unique(agg_tbl$compound_pubchem_name))
+kinases_list   <- sort(unique(agg_tbl$target))
+
+# 4. JSON Tags
+data_tags <- tagList(
+  tags$script(id = "b64-data", type = "text/plain", b64_payload),
+  tags$script(id = "comp-data", type = "application/json", HTML(toJSON(compounds_list))),
+  tags$script(id = "kin-data", type = "application/json", HTML(toJSON(kinases_list))),
+  tags$script(id = "comp-stats", type = "application/json", HTML(toJSON(comp_stats))),
+  tags$script(id = "kin-stats", type = "application/json", HTML(toJSON(kin_stats)))
+)
+```
+
+```{r ui_tags}
+viewer_tags <- tagList(
+  tags$style(HTML("
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=Manrope:wght@400;600&display=swap');
+    :root {
+      --bg: #f5f1e6;
+      --panel: #f0ece2;
+      --ink: #1f1b16;
+      --muted: #5b564c;
+      --accent: #2f2a24;
+      --accent-active: #1a1714;
+      --stroke: rgba(0,0,0,0.1);
+    }
+    body { font-family: 'Manrope', sans-serif; background-color: var(--bg); color: var(--ink); margin: 0; padding-bottom: 60px; }
+    /* Override Quarto container/page constraints (force full width) */
+    #quarto-content, .quarto-container, .main-column, .column-body, .quarto-title-block { 
+      max-width: 100% !important; 
+      margin: 0 !important; 
+      padding: 0 !important;
+    }
+    .page-container { width: 99%; max-width: 1800px; margin: 0 auto; padding: 12px 40px; }
+    header.topbar { background: var(--panel); padding: 15px 30px; border-bottom: 1px solid var(--stroke); margin-bottom: 30px; border-radius: 12px; }
+    header.topbar h1 { margin: 0; font-size: 24px; font-weight: 700; color: var(--accent); }
+    
+    .main-layout { display: grid; grid-template-columns: 420px 1fr; gap: 30px; }
+    .sidebar { position: sticky; top: 20px; display: flex; flex-direction: column; gap: 20px; }
+    .card { background: white; border: 1px solid var(--stroke); border-radius: 16px; padding: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+    
+    .stat-bar { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px; }
+    .stat-item { background: var(--panel); padding: 12px; border-radius: 12px; text-align: center; }
+    .stat-label { font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.5px; }
+    .stat-value { font-size: 18px; font-weight: 700; color: var(--ink); }
+
+    .mode-toggle { display: flex; background: var(--panel); border-radius: 10px; padding: 4px; margin-bottom: 20px; position: relative; }
+    .mode-toggle label { flex: 1; text-align: center; padding: 8px; cursor: pointer; z-index: 1; font-weight: 600; font-size: 13px; transition: color 0.3s; color: var(--muted); margin:0;}
+    .mode-toggle input { display: none; }
+    .mode-toggle input:checked + label { color: white; background: var(--accent); border-radius: 8px; }
+    
+    .form-group { display: flex; flex-direction: column; gap: 8px; margin-bottom: 15px; }
+    .form-group label { font-weight: 700; color: var(--muted); font-size: 12px; text-transform: uppercase; }
+    input[type='text'], select { padding: 10px 14px; border: 1px solid var(--stroke); border-radius: 10px; background: white; width: 100%; box-sizing: border-box; font-family: inherit; font-size: 14px;}
+    
+    .btn { padding: 12px; border-radius: 10px; border: none; font-weight: 700; cursor: pointer; text-align: center; transition: background 0.2s; font-family: inherit; }
+    .btn-primary { background: var(--accent); color: white; }
+    .btn-primary:hover { background: var(--accent-active); }
+    .btn-outline { background: white; color: var(--accent); border: 1.5px solid var(--accent); }
+    .btn-outline:hover { background: var(--bg); }
+    
+    .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+    .panel-header h3 { margin: 0; font-size: 18px; font-weight: 700; }
+    .badge { font-size: 12px; padding: 4px 10px; border-radius: 999px; background: var(--panel); color: var(--muted); border: 1px solid var(--stroke); }
+    
+    .plot-container { background: white; border: 1px solid var(--stroke); border-radius: 16px; padding: 10px; margin-bottom: 25px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);}
+    .table-container { background: white; border: 1px solid var(--stroke); border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+    .table-box { max-height: 500px; overflow-y: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { background: #fdfcf9; position: sticky; top: 0; text-align: left; padding: 14px; border-bottom: 2px solid var(--stroke); color: var(--muted); font-weight: 700; text-transform: uppercase; font-size: 11px; z-index: 10;}
+    td { padding: 12px 14px; border-bottom: 1px solid var(--stroke); color: var(--ink); }
+    tr:last-child td { border-bottom: none; }
+    tr:hover { background-color: #faf9f6; }
+    
+    .summary-list { padding: 0; list-style: none; margin-top: 10px; }
+    .summary-list li { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed var(--stroke); font-size: 13px; }
+    .summary-list li .val { font-weight: 700; }
+  ")),
+
+  tags$div(class="page-container",
+    tags$header(class="topbar",
+      tags$h1("Kinome Profiling Data Explorer")
+    ),
+    tags$div(class="main-layout",
+      tags$aside(class="sidebar",
+        tags$div(class="card",
+          tags$div(class="stat-bar",
+            tags$div(class="stat-item", tags$div(class="stat-label", "Compounds"), tags$div(id="statC", class="stat-value", "—")),
+            tags$div(class="stat-item", tags$div(class="stat-label", "Targets"), tags$div(id="statK", class="stat-value", "—"))
+          ),
+          tags$div(class="mode-toggle",
+            tags$input(id="modeDrug", type="radio", name="mode", value="drug", checked=TRUE),
+            tags$label(`for`="modeDrug", "Compound Query"),
+            tags$input(id="modeKinase", type="radio", name="mode", value="kinase"),
+            tags$label(`for`="modeKinase", "Kinase Query")
+          ),
+          tags$div(class="mode-toggle",
+            tags$input(id="viewInh", type="radio", name="viewMode", value="inh", checked=TRUE),
+            tags$label(`for`="viewInh", "% Inhibition"),
+            tags$input(id="viewKd", type="radio", name="viewMode", value="kd"),
+            tags$label(`for`="viewKd", "Kd View")
+          ),
+          tags$div(class="form-group", id="compoundGroup",
+            tags$label("PubChem Name"),
+            tags$input(id="drugSearch", type="text", list="drugList", placeholder="Type a compound…")
+          ),
+          tags$div(class="form-group", id="kinaseGroup", style="display:none;",
+            tags$label("Kinase Target"),
+            tags$input(id="kinaseSearch", type="text", list="kinaseList", placeholder="Type a kinase…")
+          ),
+          tags$button(id="btnReset", class="btn btn-primary", "Clear and Reset")
+        ),
+        tags$div(class="card",
+          tags$div(class="panel-header", tags$h3(id="infoTitle", "Compound Info")),
+          tags$div(id="summaryStats", "Choose a mode and search for a name above.")
+        ),
+        tags$button(id="btnCsv", class="btn btn-outline", "Download CSV View")
+      ),
+      tags$main(class="main-content",
+        tags$div(class="panel-header", tags$h3(id="plotTitle", "Inhibition Overview"), tags$span(id="countPill", class="badge", "— sites")),
+        tags$div(class="plot-container",
+          tags$div(id="chart", style="height: 440px;")
+        ),
+        tags$div(class="panel-header", tags$h3("Filtered Data View")),
+        tags$div(class="table-container",
+          tags$div(style="padding: 15px; border-bottom: 1px solid var(--stroke);",
+            tags$input(id="tableFilter", type="text", placeholder="Live table filter...")
+          ),
+          tags$div(class="table-box", tags$div(id="resultsTable"))
+        )
+      )
+    )
+  ),
+
+  tags$datalist(id="drugList"),
+  tags$datalist(id="kinaseList"),
+
+  tags$script(src="lib/plotly.min.js"),
+  tags$script(src="lib/pako.min.js"),
+
+  tags$script(HTML("
+  (function(){
+    // 1. DOM Refs
+    const searchD = document.getElementById('drugSearch');
+    const searchK = document.getElementById('kinaseSearch');
+    const listD   = document.getElementById('drugList');
+    const listK   = document.getElementById('kinaseList');
+    const tableEl = document.getElementById('resultsTable');
+    const chartEl = document.getElementById('chart');
+    const title   = document.getElementById('plotTitle');
+    const pill    = document.getElementById('countPill');
+    const btnReset = document.getElementById('btnReset');
+    const btnCsv   = document.getElementById('btnCsv');
+    const tableF   = document.getElementById('tableFilter');
+    const infoTitle = document.getElementById('infoTitle');
+
+    // 2. Data State
+    let fullData      = [];
+    let compoundNames = [];
+    let kinaseNames   = [];
+    let compoundStats = {};
+    let kinaseStats   = {};
+    
+    const fmt = n => (n === null || isNaN(n)) ? '—' : Number(n).toLocaleString(undefined, {maximumFractionDigits:1});
+    const getMode = () => document.querySelector('input[name=\"mode\"]:checked').value;
+    const getView = () => document.querySelector('input[name=\"viewMode\"]:checked').value;
+
+    function filteredSet(){
+      const m = getMode();
+      const v = getView();
+      const name = (m === 'drug' ? searchD.value : searchK.value).trim();
+      if(!name) return [];
+      
+      let rows = fullData.filter(r => {
+        return m === 'drug' ? (r.compound_pubchem_name === name) : (r.target === name);
+      });
+      
+      if(v === 'kd'){
+        return rows.sort((a,b) => {
+          const kA = Number.isFinite(a.kd) ? a.kd : 999999;
+          const kB = Number.isFinite(b.kd) ? b.kd : 999999;
+          return kA - kB;
+        });
+      }
+      return rows.sort((a,b) => b.median_inhibition - a.median_inhibition);
+    }
+
+    function renderSummary(rows){
+      const wrap = document.getElementById('summaryStats');
+      const m = getMode();
+      const v = getView();
+      const name = (m === 'drug' ? searchD.value : searchK.value).trim();
+      
+      if(!rows.length || !name){
+        wrap.textContent = 'No data for this selection at 1uM.';
+        pill.textContent = '0 interactions';
+        return;
+      }
+
+      // Find top measurable binding (lowest Kd)
+      const binders = rows.filter(r => Number.isFinite(r.kd));
+      const topBinder = binders.length ? binders.sort((a,b) => a.kd - b.kd)[0] : null;
+
+      if(m === 'drug'){
+        infoTitle.textContent = 'Compound Info';
+        const stats = compoundStats[name] || {};
+        const cid = stats.cid;
+        const phase = stats.max_phase || 0;
+        const hits = stats.hits_80 || 0;
+        const pubchemUrl = cid ? `https://pubchem.ncbi.nlm.nih.gov/compound/${cid}` : '#';
+
+        let extraLine = (v === 'kd' && topBinder) ? `<li>Strongest Target (Kd) <span class=\"val\">${topBinder.target} (${fmt(topBinder.kd)} nM)</span></li>` : '';
+
+        wrap.innerHTML = `<ul class=\"summary-list\">` +
+          `<li>Selectivity (>80% inh) <span class=\"val\">${hits} targets</span></li>` +
+          `<li>Max Clinical Trial Phase <span class=\"val\">Phase ${phase}</span></li>` +
+          extraLine +
+          `<li>PubChem Link <span class=\"val\"><a href=\"${pubchemUrl}\" target=\"_blank\">View</a></span></li>` +
+        `</ul>`;
+      } else {
+        infoTitle.textContent = 'Kinase Info';
+        const stats = kinaseStats[name] || {};
+        const hits80 = stats.hits_80 || 0;
+        const sel = stats.selectivity_pct || 0;
+        const entrez = stats.entrez;
+        
+        const ncbiUrl = entrez ? `https://www.ncbi.nlm.nih.gov/gene/${entrez}` : '#';
+        const uniprotUrl = entrez ? `https://www.uniprot.org/uniprotkb?query=${entrez}` : `https://www.uniprot.org/uniprotkb?query=${encodeURIComponent(name)}`;
+
+        let extraLine = (v === 'kd' && topBinder) ? `<li>Best Binder (Kd) <span class=\"val\">${topBinder.compound_pubchem_name} (${fmt(topBinder.kd)} nM)</span></li>` : '';
+
+        wrap.innerHTML = `<ul class=\"summary-list\">` +
+          `<li>Sensitive to (>80%) <span class=\"val\">${hits80} drugs</span></li>` +
+          `<li>Selectivity score <span class=\"val\">${fmt(sel)}% of lib</span></li>` +
+          extraLine +
+          `<li>Entrez Gene <span class=\"val\"><a href=\"${ncbiUrl}\" target=\"_blank\">${entrez || 'View'}</a></span></li>` +
+          `<li>UniProt <span class=\"val\"><a href=\"${uniprotUrl}\" target=\"_blank\">Reference</a></span></li>` +
+        `</ul>`;
+      }
+      
+      pill.textContent = rows.length + ' interactions found';
+    }
+
+    function renderPlot(rows){
+      Plotly.purge(chartEl);
+      chartEl.innerHTML = '';
+      if(!rows.length) return;
+      
+      const v = getView();
+      // Remove null values and filter for potency if in Kd view
+      let plotData = v === 'kd' ? rows.filter(r => Number.isFinite(r.kd) && r.kd < 500) : rows;
+      if(!plotData.length){
+        const msg = v === 'kd' ? 'No potent binding data (< 500 nM) available for this selection.' : 'No inhibition data available.';
+        chartEl.innerHTML = `<div style=\"height: 440px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-style: italic;\">${msg}</div>`;
+        return;
+      }
+
+      const top = plotData.slice(0, 15);
+      const x = top.map(r => v === 'kd' ? r.kd : r.median_inhibition);
+      const y = top.map(r => getMode() === 'drug' ? r.target : r.compound_pubchem_name);
+      
+      const trace = {
+        type: 'bar',
+        orientation: 'h',
+        x: x,
+        y: y,
+        marker: { color: v === 'kd' ? '#5b564c' : '#2f2a24', line: { width: 1, color: '#000' } },
+        hovertemplate: v === 'kd' ? '<b>%{y}</b><br>Kd: %{x} nM<extra></extra>' : '<b>%{y}</b><br>Inhibition: %{x:.1f}%<extra></extra>'
+      };
+
+      const layout = {
+        margin: { l: 300, r: 20, t: 10, b: 40 },
+        height: 420,
+        xaxis: { title: v === 'kd' ? 'Kd (nM)' : '% Inhibition (1 uM)', autorange: v === 'kd' ? true : false, range: v === 'kd' ? null : [0, Math.max(100, ...x) * 1.05] },
+        yaxis: { autorange: 'reversed' },
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { family: 'Manrope, sans-serif' }
+      };
+
+      Plotly.newPlot(chartEl, [trace], layout, { displaylogo: false, responsive: true });
+    }
+
+    function renderTable(rows){
+      tableEl.innerHTML = '';
+      if(!rows.length) return;
+      
+      const v = getView();
+      let results = rows;
+      
+      // Filter for potency if in Kd view
+      if(v === 'kd'){
+        results = results.filter(r => Number.isFinite(r.kd) && r.kd < 500);
+      }
+
+      const filter = tableF.value.toLowerCase().trim();
+      if(filter){
+        results = results.filter(r => [r.compound_pubchem_name, r.target, r.target_entrez_id].some(val => String(val).toLowerCase().includes(filter)));
+      }
+
+      if(!results.length){
+        tableEl.innerHTML = '<div style=\"padding: 20px; text-align: center; color: var(--muted); font-style: italic;\">No data matching current mode and table filters.</div>';
+        return;
+      }
+
+      const t = document.createElement('table');
+      const hRow = '<thead><tr><th>Compound</th><th>Target Kinase</th><th>% Inh</th><th>Kd (nM)</th><th>N</th></tr></thead>';
+      const bRows = results.map(r => {
+        return '<tr>' +
+          '<td>' + (r.compound_pubchem_name || '') + '</td>' +
+          '<td>' + (r.target || '') + '</td>' +
+          '<td>' + fmt(r.median_inhibition) + '%</td>' +
+          '<td>' + (r.kd !== null ? fmt(r.kd) : '—') + '</td>' +
+          '<td>' + (r.n_measurements || 1) + '</td>' +
+        '</tr>';
+      }).join('');
+      
+      t.innerHTML = hRow + '<tbody>' + bRows + '</tbody>';
+      tableEl.appendChild(t);
+    }
+
+    function refresh(){
+      const rows = filteredSet();
+      const m = getMode();
+      const v = getView();
+      renderSummary(rows);
+      renderPlot(rows);
+      renderTable(rows);
+      
+      let baseTitle = m === 'drug' ? 'Top Target' : 'Top Inhibitor';
+      let measure = v === 'kd' ? 'Potency (Kd)' : 'Sensitivity (% Inhibition at 1uM)';
+      title.textContent = `${baseTitle} ${measure}`;
+    }
+
+    // 3. Events
+    document.querySelectorAll('input[name=\"mode\"]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        const m = getMode();
+        document.getElementById('compoundGroup').style.display = m === 'drug' ? 'flex' : 'none';
+        document.getElementById('kinaseGroup').style.display = m === 'kinase' ? 'flex' : 'none';
+        refresh();
+      });
+    });
+
+    document.querySelectorAll('input[name=\"viewMode\"]').forEach(radio => {
+      radio.addEventListener('change', refresh);
+    });
+
+    searchD.addEventListener('change', refresh);
+    searchK.addEventListener('change', refresh);
+    tableF.addEventListener('input', () => renderTable(filteredSet()));
+    
+    btnReset.addEventListener('click', () => {
+      searchD.value = ''; searchK.value = ''; tableF.value = '';
+      refresh();
+    });
+
+    btnCsv.addEventListener('click', () => {
+      const rows = filteredSet();
+      if(!rows.length) return;
+      const header = ['compound','cid','target','entrez','median_inh','kd_nM','n'];
+      const sc = String.fromCharCode(34); // Double quote
+      const nl = String.fromCharCode(10); // Newline
+      const lines = [header.join(',')].concat(rows.map(r => {
+        return [
+          sc + (r.compound_pubchem_name || '').replace(sc, sc+sc) + sc,
+          r.compound_pubchem_cid,
+          sc + (r.target || '').replace(sc, sc+sc) + sc,
+          r.target_entrez_id,
+          r.median_inhibition.toFixed(2),
+          r.kd !== null ? r.kd.toFixed(2) : '',
+          r.n_measurements
+        ].join(',');
+      }));
+      const blob = new Blob([lines.join(nl)], {type: 'text/csv'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'kinobeads_filtered_view.csv';
+      a.click();
+    });
+
+    // 4. Initial Bootstrap
+    async function boot(){
+      try {
+        const b64 = document.getElementById('b64-data').textContent.trim();
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        
+        fullData = JSON.parse(pako.inflate(bytes, {to: 'string'}));
+        compoundNames = JSON.parse(document.getElementById('comp-data').textContent);
+        kinaseNames   = JSON.parse(document.getElementById('kin-data').textContent);
+        
+        // Re-index stats for fast lookup
+        JSON.parse(document.getElementById('comp-stats').textContent).forEach(s => {
+          compoundStats[s.compound_pubchem_name] = s;
+        });
+        JSON.parse(document.getElementById('kin-stats').textContent).forEach(s => {
+          kinaseStats[s.target] = s;
+        });
+        
+        // Populate Datalists
+        const fragD = document.createDocumentFragment();
+        compoundNames.forEach(n => { const o = document.createElement('option'); o.value = n; fragD.appendChild(o); });
+        listD.appendChild(fragD);
+        
+        const fragK = document.createDocumentFragment();
+        kinaseNames.forEach(n => { const o = document.createElement('option'); o.value = n; fragK.appendChild(o); });
+        listK.appendChild(fragK);
+        
+        document.getElementById('statC').textContent = compoundNames.length.toLocaleString();
+        document.getElementById('statK').textContent = kinaseNames.length.toLocaleString();
+
+        // Initial Selection
+        if(compoundNames.length) searchD.value = compoundNames[0];
+        refresh();
+        
+      } catch(err) {
+        console.error('Fatal Error Loading Data:', err);
+        title.textContent = 'Error Loading App Component';
+      }
+    }
+
+    boot();
+  })();
+  "))
+)
+
+browsable(tagList(data_tags, viewer_tags))
+```

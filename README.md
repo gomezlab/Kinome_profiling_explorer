@@ -1,35 +1,38 @@
-# optimal_kinase_library
-Library of kinase datasets commonly used for modeling tasks. For data/results folders, see [OneDrive](https://adminliveunc-my.sharepoint.com/:f:/r/personal/smgomez_ad_unc_edu/Documents/GomezLabDataShare/GithubData/optimal_kinase_library?csf=1&web=1&e=WdzFzN) (may require permission)
+# Explorer for Kinome Profiling Data
 
-## File Descriptions (WIP)
-> Main KIS data sources:
->* Klaeger/Kinomescan
->   * %inhibition: various conc levels
->   * Kd inhibition: dissociation constant/binding affinity, gives a holistic view of drug effect (vs at specific conc levels)
->* Kuster
->   * extra ~800 compounds that are a follow up to original ~200 Klaeger compounds
->* OKL (Optimal Kinase Library)
->   * Peter Sorger's inhibition data
+An interactive dashboard for exploring large-scale kinome profiling datasets. This tool provides a unified view of compound-kinase interaction potencies and inhibition Kds across ~1750 compounds and ~500 kinases, totalling ~900,000 combinations.
 
-```data/```
-* raw data, including ALMANAC, CCLE, Klaeger, LINCS, Kuster, OKL, PDX, and PRISM
+## Data Overview
 
-```figures/```
-* ???
+This explorer integrates high-quality kinome-wide profiling data, specifically focusing on:
+- **Percent Inhibition**: Measured at a 1µM drug concentration.
+- **Apparent Kd (nM)**: Quantitative binding affinity derived from dose-response profiling.
+- **Extended Metadata**: Includes compound clinical trial phases, PubChem identifiers, and kinase-specific links (Entrez/UniProt).
 
-```results/```
-* preprocessed and combined datasets
-* ```combined_dose_data.fst```
-    * pooled data from all sources, with source column for identification/filtering
-    * KIS range from 0-1 indicating 0-100% inhibition
-* ```combined_kd_data.fst```
-    * Kd data (when provided/calculated)
-* ```XXX_summarized.fst```
-    * summarized data across sources where the mean is used if there is exact overlap between drug AND conc between sources
+## How to Use the Viewer
 
-```src/```
-* R scripts for dataset preprocessing
+1.  **Toggle Mode**: Choose between **Compound Explorer** (to see all targets of a specific drug) or **Kinase Explorer** (to see all drugs targeting a specific kinase).
+2.  **Selection**: Search for a compound or kinase using the searchable dropdown menus.
+3.  **View Modes**: 
+    - **Inhibition View**: Displays sensitivity as % inhibition at 1µM. Higher bars indicate stronger inhibition.
+    - **Kd View**: Displays potency as apparent dissociation constants (nM). Lower values (and longer bars) indicate stronger binding affinity. Only potent binders (< 500 nM) are shown in the summary plot.
+4.  **Info Panels**: View metadata for your selection, including clinical status, selectivity scores, and external database links.
+5.  **Data Table**: Filter the raw data using the table search box and export your current filtered view as a CSV for further analysis.
 
-## Notes
-* Default to Klaeger + Kuster dataset as our "best" single source, as they are most consistent.
-* ```data/PRISM/``` contains ```primary``` and ```secondary``` folders. These correspond to two rounds of expirements/screens. We only use the ```secondary``` screen.
+## Data Mining and Processing (Methods)
+
+The data provided in this viewer was synthesized from three major kinome profiling initiatives. All chemical entities were standardized using PubChem CIDs, and all protein targets were mapped to Entrez Gene IDs to ensure cross-dataset compatibility.
+
+### Data Sources
+- **Kuster Dataset**: Integrated from mass-spectrometry based kinobeads profiling. Global proteome-wide data was retrieved from the MASSIVE repository ([MSV000092248](https://massive.ucsd.edu/v05/MSV000092248/)) and processed as described in [Reinecke et al. (2024)](https://pubmed.ncbi.nlm.nih.gov/37904048/).
+- **LINCS Dataset**: Derived from the Library of Integrated Network-based Cellular Signatures, including imputed kinome-wide profiles as described in [Joisa et al (2023)](https://pubmed.ncbi.nlm.nih.gov/38025707/).
+- **Klaeger Dataset**: Mined from the 2107 foundational target landscape of clinical kinase inhibitors as detailed in [Berginski and Joisa et al. (2023)](https://pubmed.ncbi.nlm.nih.gov/36809237/).
+
+### Processing Pipeline
+1.  **Kuster Processing**: Raw dose-response data files were parsed to extract normalized Label-Free Quantification (LFQ) intensities. Relative intensities (percent of control) were calculated by normalizing drug-treated intensities to the corresponding DMSO control values within each batch. Median values were calculated across replicates for the 1µM dose.
+2.  **Harmonization**: Relative binding intensities and apparent Kd values for LINCS and Klaeger were extracted from their respective published tidy datasets. All relative intensities were converted to a consistent 0-100 scale (% inhibition).
+3.  **Apparent Kd Calculation**: For dose-response data where Kd was not explicitly provided, binding curves were integrated or retrieved from source metadata to provide the `mean_kd_apparent` values shown in this dashboard.
+4.  **Integration**: Datasets were merged into a single master interaction table. Only kinases with coverage across multiple datasets (n > 100 measurements) were retained to ensure data robustness.
+
+---
+*Created by Chinmaya Joisa for the Gomez Lab.*
