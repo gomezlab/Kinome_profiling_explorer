@@ -66,7 +66,7 @@ if(file.exists(kd_path)) {
   kd_tbl <- read_fst(kd_path) %>%
     mutate(target_entrez_id = as.character(target_entrez_id)) %>%
     group_by(compound_pubchem_name, target) %>%
-    summarize(kd = mean(mean_kd_apparent, na.rm = TRUE), .groups = "drop")
+    summarize(kd = min(mean_kd_apparent, na.rm = TRUE), .groups = "drop")
   
   agg_tbl <- dose_1uM_summary %>%
     left_join(kd_tbl, by = c("compound_pubchem_name", "target"))
