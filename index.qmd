@@ -44,8 +44,7 @@ if(!file.exists(data_path)) stop("Data file not found at path: ", data_path)
 # 1. Aggregation and Filtering
 # Note: percent_inhibition is 0 to 1 scale in the source FST.
 all_1uM <- read_fst(data_path) %>%
-  filter(compound_dose_uM == 1) %>%
-    filter(compound_pubchem_name == "Erlotinib")
+  filter(compound_dose_uM == 1)
 
 # Summary of hits > 10%
 dose_1uM_summary <- all_1uM %>%
