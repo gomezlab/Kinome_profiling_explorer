@@ -38,13 +38,14 @@ if(!file.exists(pako_js)) {
 ```
 
 ```{r data_prep}
-data_path <- here("results/combined_dose_data_summarized_no_okl_LFQ_only_annotated_v2.fst")
+data_path <- here("results/combined_dose_data_summarized_LFQ_only_annotated_v2.fst")
 if(!file.exists(data_path)) stop("Data file not found at path: ", data_path)
 
 # 1. Aggregation and Filtering
 # Note: percent_inhibition is 0 to 1 scale in the source FST.
 all_1uM <- read_fst(data_path) %>%
-  filter(compound_dose_uM == 1)
+  filter(compound_dose_uM == 1) %>%
+    filter(compound_pubchem_name == "Erlotinib")
 
 # Summary of hits > 10%
 dose_1uM_summary <- all_1uM %>%
@@ -61,7 +62,7 @@ dose_1uM_summary <- all_1uM %>%
   )
 
 # Join Kd Data
-kd_path <- here("results/combined_kd_data_summarized_no_okl.fst")
+kd_path <- here("results/combined_kd_data_summarized.fst")
 if(file.exists(kd_path)) {
   kd_tbl <- read_fst(kd_path) %>%
     mutate(target_entrez_id = as.character(target_entrez_id)) %>%
@@ -372,7 +373,7 @@ viewer_tags <- tagList(
       };
 
       const layout = {
-        margin: { l: 300, r: 20, t: 10, b: 40 },
+        margin: { l: 150, r: 20, t: 10, b: 40 },
         height: 420,
         xaxis: { title: v === 'kd' ? 'Kd (nM)' : '% Inhibition (1 uM)', autorange: v === 'kd' ? true : false, range: v === 'kd' ? null : [0, Math.max(100, ...x) * 1.05] },
         yaxis: { autorange: 'reversed' },

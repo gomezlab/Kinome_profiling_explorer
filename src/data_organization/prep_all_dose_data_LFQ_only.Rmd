@@ -540,6 +540,57 @@ ht
 
 ```
 
+### Make Heatmap of erlotinib at all doses for each dataset
+```{r}
+combined_dataset = read_fst(here("results/combined_dose_data_LFQ_only.fst"))
+
+heatmap_data = combined_dataset  %>% 
+    filter(compound_pubchem_cid == "176870")  %>% 
+    select(compound_dose_M, dataset, target, relative_intensity)  %>%
+    mutate(compound_dose_M = as.numeric(as.character(compound_dose_M)))  %>% 
+    mutate(compound_dose_uM = compound_dose_M * 10^6)  %>%
+    mutate(dataset_dose = paste0(dataset, "_", compound_dose_uM))  %>%
+    select(-compound_dose_M)  %>%
+    filter(compound_dose_uM != 0)  %>%
+    drop_na()
+
+ht = heatmap_data %>%
+    as_tibble() %>%
+    filter(target == "EGFR") %>%
+  heatmap(
+    .row = dataset_dose,
+    .column = target,
+    .value = relative_intensity,
+    scale = "none",
+    cluster_rows = FALSE,
+    cluster_columns = FALSE,
+    #cluster_columns = FALSE,
+    palette_value = circlize::colorRamp2(
+      seq(0, 1, length.out = 11), 
+      rev(RColorBrewer::brewer.pal(11, "RdBu"))
+    ),
+    row_names_gp = gpar(fontsize = 10),
+    column_names_gp = gpar(fontsize = 4),
+    column_title = "Erlotinib Specificity at All Doses",
+    show_column_names = TRUE,
+    heatmap_legend_param = list(title = "Relative Intensity", title_position = "topcenter", legend_direction = "horizontal")
+  ) 
+
+
+png("figures/heatmap_erlotinib_all_doses_LFQ_only.png", width = 5500, height = 1000, res = 300)
+# Draw the heatmap
+draw(
+  ht %>% as_ComplexHeatmap(),
+  heatmap_legend_side = "bottom",
+  legend_grouping = "original",
+  padding = unit(c(10, 2, 2, 2), "mm")
+)
+dev.off()
+
+ht
+
+```
+
 ### Make Heatmap of all drugs at 1 uM (all kinases, missing imputed to 0)
 ```{r}
 combined_dataset_summarized = read_fst(here("results/combined_dose_data_summarized_LFQ_only.fst"))
