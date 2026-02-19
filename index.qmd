@@ -51,7 +51,7 @@ dose_1uM_summary <- all_1uM %>%
   filter(percent_inhibition > 0.1) %>% 
   group_by(compound_pubchem_name, target) %>%
   summarize(
-    median_inhibition = median(percent_inhibition, na.rm = TRUE) * 100,
+    max_inhibition = max(percent_inhibition, na.rm = TRUE) * 100,
     mean_inhibition   = mean(percent_inhibition, na.rm = TRUE) * 100,
     n_measurements    = n(),
     compound_pubchem_cid = as.character(first(compound_pubchem_cid)),
@@ -80,7 +80,7 @@ comp_stats <- agg_tbl %>%
   summarize(
     cid = first(compound_pubchem_cid),
     max_phase = first(max_phase),
-    hits_80 = sum(median_inhibition > 80),
+    hits_80 = sum(max_inhibition > 80),
     .groups = "drop"
   )
 
@@ -90,7 +90,7 @@ kin_stats <- agg_tbl %>%
   group_by(target) %>%
   summarize(
     entrez = first(target_entrez_id),
-    hits_80 = sum(median_inhibition > 80),
+    hits_80 = sum(max_inhibition > 80),
     selectivity_pct = (hits_80 / total_compounds_in_lib) * 100,
     .groups = "drop"
   )
@@ -285,7 +285,7 @@ viewer_tags <- tagList(
           return kA - kB;
         });
       }
-      return rows.sort((a,b) => b.median_inhibition - a.median_inhibition);
+      return rows.sort((a,b) => b.max_inhibition - a.max_inhibition);
     }
 
     function renderSummary(rows){
@@ -359,7 +359,7 @@ viewer_tags <- tagList(
       }
 
       const top = plotData.slice(0, 15);
-      const x = top.map(r => v === 'kd' ? r.kd : r.median_inhibition);
+      const x = top.map(r => v === 'kd' ? r.kd : r.max_inhibition);
       const y = top.map(r => getMode() === 'drug' ? r.target : r.compound_pubchem_name);
       
       const trace = {
@@ -412,7 +412,7 @@ viewer_tags <- tagList(
         return '<tr>' +
           '<td>' + (r.compound_pubchem_name || '') + '</td>' +
           '<td>' + (r.target || '') + '</td>' +
-          '<td>' + fmt(r.median_inhibition) + '%</td>' +
+          '<td>' + fmt(r.max_inhibition) + '%</td>' +
           '<td>' + (r.kd !== null ? fmt(r.kd) : '—') + '</td>' +
           '<td>' + (r.n_measurements || 1) + '</td>' +
         '</tr>';
@@ -470,7 +470,7 @@ viewer_tags <- tagList(
           r.compound_pubchem_cid,
           sc + (r.target || '').replace(sc, sc+sc) + sc,
           r.target_entrez_id,
-          r.median_inhibition.toFixed(2),
+          r.max_inhibition.toFixed(2),
           r.kd !== null ? r.kd.toFixed(2) : '',
           r.n_measurements
         ].join(',');
